@@ -1,0 +1,28 @@
+{
+  "name": "yanshuo.io",
+  "version": "1.0.0",
+  "description": "演说.io on Cloudflare Workers (migrated from LeanCloud)",
+  "scripts": {
+    "dev": "wrangler dev",
+    "db:migrate": "wrangler d1 migrations apply yanshuo --remote",
+    "db:migrate:local": "wrangler d1 migrations apply yanshuo --local",
+    "deploy": "wrangler deploy",
+    "test": "node --test test/*.test.mjs",
+    "export:leancloud": "node scripts/export-leancloud.mjs",
+    "import": "node scripts/import.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Huxpro/yanshuo.io.git"
+  },
+  "license": "UNLICENSED",
+  "bugs": {
+    "url": "https://github.com/Huxpro/yanshuo.io/issues"
+  },
+  "homepage": "https://github.com/Huxpro/yanshuo.io#readme",
+  "devDependencies": {
+    "wrangler": "^4.143.0"
+  },
+  "private": true,
+  "type": "module"
+}

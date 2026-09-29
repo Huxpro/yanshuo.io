@@ -152,9 +152,6 @@
 			<!-- async content -->
 		</div>
 
-		<!-- leanCloud SDK -->
-		<script src="https://cdn1.lncld.net/static/js/av-mini-0.6.4.js"></script>
-
 		<!-- dependencies -->
 		<script src="lib/js/head.min.js"></script>
 		<script src="js/reveal.min.js"></script>
@@ -263,17 +260,17 @@
 					return;
 				}
 
-				AV.initialize(
-					'im99VNboLC4mtFOCDlR3q6hT-gzGzoHsz',
-					'Hvnep5LAWmhJATEVaRb9S4Os'
-				);
-
-				var query = new AV.Query('YSDeck');
-				query.get(deckId).then(function(deck){
-					initDeck(deck)
-				}, function(error){
-					renderError();
-				})
+				// Served by the Worker in src/index.js (LeanCloud-compatible API)
+				var xhr = new XMLHttpRequest();
+				xhr.open('GET', '/1.1/classes/YSDeck/' + encodeURIComponent(deckId) + '?keys=metaHTML');
+				xhr.onload = function(){
+					var deck = null;
+					try { deck = JSON.parse(xhr.responseText) } catch (e) {}
+					if (xhr.status !== 200 || !deck || !deck.metaHTML) return renderError();
+					initDeck({ get: function(key){ return deck[key] } })
+				}
+				xhr.onerror = renderError;
+				xhr.send();
 			}
 
 			initYS();
