@@ -6,7 +6,7 @@
 **2027-01-12 停止服务**（[公告](https://docs.leancloud.cn/sdk/announcements/sunset-export/)）。
 
 ```
-public/                    线上编译产物（从 GitHub Pages 镜像，原始源码不在本仓库）
+public/                    线上编译产物（与 Huxpro/airtalk 的 gh-pages 分支一致，原始源码已不在 GitHub 上）
 src/index.js               Cloudflare Worker：静态资源 + 兼容 LeanCloud REST 的 /1.1/* API
 src/password.js            密码哈希（PBKDF2，兼容校验 LeanCloud 导出的旧哈希）
 migrations/                D1 表结构
@@ -17,8 +17,10 @@ test/                      迁移端到端测试（npm test）
 
 ## 现状调研（2026-09-29）
 
-- 站点是纯前端 SPA（React + 打包进来的 LeanCloud JS SDK 0.6.10），托管在 GitHub Pages，
+- 站点是纯前端 SPA（React + 打包进来的 LeanCloud JS SDK 0.6.10），由私有仓库 `Huxpro/airtalk`
+  的 `gh-pages` 分支通过 GitHub Pages 托管（`CNAME` 为 `yanshuo.io`，只有 2017 年的一次 `dist` 提交，没有源码）。
   域名 DNS 已经在 Cloudflare（`marek/tegan.ns.cloudflare.com`）。
+- `Huxpro/ys.static` 是演说里引用的图片等附件，独立托管在 GitHub Pages 上，不依赖 LeanCloud，这次迁移不涉及它。
 - 对 LeanCloud 的依赖很少，只有**数据存储**里的两张表，没有云引擎、文件、推送、IM、短信：
   - `_User`：`username` / `email` / `password`，只用了注册和登录。
   - `YSDeck`：`pubUserId`、`metadata`（编辑器工程 JSON）、`metaHTML`（发布后的 HTML）。
@@ -111,7 +113,7 @@ ADMIN_TOKEN=... npm run import -- --target https://yanshuo.<account>.workers.dev
 1. 在 `*.workers.dev` 上验证：用老账号登录、打开几个老的分享链接、新建并发布一个演说。
 2. 在 Cloudflare DNS 里删掉 `yanshuo.io` / `www` 指向 GitHub Pages 的记录，然后打开 `wrangler.jsonc`
    里注释掉的 `routes`（Custom Domain），再执行 `npm run deploy`。
-3. 在原来的 GitHub Pages 仓库里关掉 Pages（或删掉 CNAME），避免两边同时提供服务。
+3. 在 `Huxpro/airtalk` 里关掉 GitHub Pages（Settings → Pages，或删掉 `CNAME`），避免两边同时提供服务。
 4. 可选：Cloudflare → Security → WAF 给 `/1.1/login` 加一条速率限制规则（免费计划有 1 条），防止暴力破解密码。
 
 ## 本地开发
