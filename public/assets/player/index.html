@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8">
+
+		<title>演说.io - 分享你的云演说</title>
+
+		<meta name="keywords" content="演说，yanshuo, yanshuo.io, 演说.io, 空中演说, 展示文稿, HTML 展示文稿, Web 展示文稿" />
+	  <meta name="description" content="创作真正跨平台的 HTML5 展示文稿，让你的分享到达世界的任何一个角落" />
+
+		<meta name="apple-mobile-web-app-capable" content="yes">
+		<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+
+		<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+
+		<!-- Reveal base style -->
+		<link rel="stylesheet" href="css/reveal.min.css">
+
+		<!-- Yanshuo.io seed style -->
+		<link rel="stylesheet" href="atcss/at-block.min.css">
+		<link rel="stylesheet" href="atcss/at-hljs-theme-bundler.min.css">
+		<!-- v2 default theme style,
+		     would be cascaded by js-generated style injected in metaHTML -->
+		<link rel="stylesheet" href="atcss/at-reveal-default-theme.min.css">
+
+		<!-- Source Sans Web Fonts -->
+		<link rel="stylesheet" href="lib/font/source-sans-pro/source-sans-pro.css">
+
+		<!-- Printing and PDF exports -->
+		<script>
+			var link = document.createElement( 'link' );
+			link.rel = 'stylesheet';
+			link.type = 'text/css';
+			link.href = window.location.search.match( /print-pdf/gi ) ? 'css/print/pdf.css' : '';
+			document.getElementsByTagName( 'head' )[0].appendChild( link );
+		</script>
+
+		<!--[if lt IE 9]>
+		<script src="lib/js/html5shiv.js"></script>
+		<![endif]-->
+
+		<!-- style for loading, sort of "critical path" -->
+		<style>
+			#pre-loading-mask {
+				position: absolute;;
+			  background: #69130c;
+				width: 100%;
+			  height: 100%;
+				opacity: 1;
+				z-index: 999999;
+				-webkit-transition: opacity 1s ease;
+				-moz-transition: opacity 1s ease;
+				-o-transition: opacity 1s ease;
+				transition: opacity 1s ease;
+			}
+			#pre-loading{
+			  color: white;
+			  font-family: sans-serif;
+			  font-size: 14px;
+			  width: 100%;
+			  height: 160px;
+			  margin: auto;
+			  position: absolute;
+			  text-align: center;
+			  top: 0;
+			  left: 0;
+			  bottom: 0;
+			  right: 0;
+			}
+			#pre-loading a{
+			  color: white;
+			  text-decoration: none;
+			}
+			#pre-loading>.pre-floating{
+				font-size: 50px;
+			  -webkit-animation: floating 2s ease-in-out infinite;
+			     -moz-animation: floating 2s ease-in-out infinite;
+			       -o-animation: floating 2s ease-in-out infinite;
+			          animation: floating 2s ease-in-out infinite;
+			}
+			@-webkit-keyframes floating {
+			  from{
+			    -webkit-transform: translate3d(0,-5px,0);
+			            transform: translate3d(0,-5px,0);
+			  }
+			  50%{
+				  -webkit-transform: translate3d(0,5px,0);
+				          transform: translate3d(0,5px,0);
+			  }
+			  to{
+			    -webkit-transform: translate3d(0,-5px,0);
+			            transform: translate3d(0,-5px,0);
+			  }
+			}
+			@-moz-keyframes floating {
+			  from{
+			    -moz-transform: translate3d(0,-5px,0);
+			         transform: translate3d(0,-5px,0);
+			  }
+			  50%{
+				  -moz-transform: translate3d(0,5px,0);
+				       transform: translate3d(0,5px,0);
+			  }
+			  to{
+			    -moz-transform: translate3d(0,-5px,0);
+			         transform: translate3d(0,-5px,0);
+			  }
+			}
+			@-o-keyframes floating {
+			  from{
+			    transform: translate3d(0,-5px,0);
+			  }
+			  50%{
+				  transform: translate3d(0,5px,0);
+			  }
+			  to{
+			    transform: translate3d(0,-5px,0);
+			  }
+			}
+			@keyframes floating {
+			  from{
+			    -webkit-transform: translate3d(0,-5px,0);
+			       -moz-transform: translate3d(0,-5px,0);
+			            transform: translate3d(0,-5px,0);
+			  }
+			  50%{
+				  -webkit-transform: translate3d(0,5px,0);
+				     -moz-transform: translate3d(0,5px,0);
+				          transform: translate3d(0,5px,0);
+			  }
+			  to{
+			    -webkit-transform: translate3d(0,-5px,0);
+			       -moz-transform: translate3d(0,-5px,0);
+			            transform: translate3d(0,-5px,0);
+			  }
+			}
+	  </style>
+	</head>
+
+	<body>
+		<!-- loading spinner -->
+		<div id="pre-loading-mask">
+			<div id="pre-loading">
+				<img class="pre-floating" width="100" height="100"
+					src="https://yanshuo.io/assets/images/icon_128x128@2x.png">
+				<p> 喝口清茶，您的演说即将开始... </p>
+			</div>
+		</div>
+
+		<!-- YanShuo.io slide container -->
+		<div id="YSContainer" style="width:100%; height:100%;">
+			<!-- async content -->
+		</div>
+
+		<!-- leanCloud SDK -->
+		<script src="https://cdn1.lncld.net/static/js/av-mini-0.6.4.js"></script>
+
+		<!-- dependencies -->
+		<script src="lib/js/head.min.js"></script>
+		<script src="js/reveal.min.js"></script>
+
+		<!-- YanShuo.io player algorithms -->
+		<script>
+			function searchToObject() {
+			  var pairs = window.location.search.substring(1).split("&"),
+			    obj = {},
+			    pair,
+			    i;
+
+			  for ( i in pairs ) {
+			    if ( pairs[i] === "" ) continue;
+
+			    pair = pairs[i].split("=");
+			    obj[ decodeURIComponent( pair[0] ) ] = decodeURIComponent( pair[1] );
+			  }
+
+			  return obj;
+			}
+
+			function dismissLoading(){
+				var $loading = document.getElementById('pre-loading-mask')
+				$loading.style.opacity = 0;
+				setTimeout(function(){
+					$loading.style.display = 'none';
+				}, 1000)
+			}
+
+			function renderError(){
+				var $loading = document.getElementById('pre-loading')
+				$loading.innerHTML = "<h1 class='pre-floating'> 404 </h1><p>抱歉，您访问的演说可能不存在或者已被删除<p>"
+			}
+
+			function initTitle(){
+				var $title = document.getElementsByTagName('title')[0]
+				var user = _ys('user')
+				var title = _ys('title')
+
+				$title.innerHTML = title + ' - ' + user + '@演说.io'
+			}
+
+			function initReveal(){
+				Reveal.initialize({
+					controls: true,
+					progress: true,
+					history: true,
+					center: false,
+
+					// setting from metadata
+					transition:            	_ys('transition'),
+					backgroundTransition:   _ys('backgroundTransition'),
+					transitionSpeed:        _ys('transitionSpeed'),
+
+					// no marked.js
+					// no markdown.js
+					// no highlight.js
+					dependencies: [
+						{ src: 'lib/js/classList.js', condition: function() { return !document.body.classList; } },
+						{ src: 'plugin/zoom-js/zoom.js', async: true },
+						{ src: 'plugin/notes/notes.js', async: true }
+					]
+				});
+			}
+
+			function loadCSS(url){
+				var link = document.createElement( 'link' );
+				link.rel = 'stylesheet';
+				link.type = 'text/css';
+				link.href = url;
+				document.getElementsByTagName( 'head' )[0].appendChild( link );
+			}
+
+			function hotfixVersion(){
+				var fv = _ys('fv')
+				// load v1 theme bundler for legacy pre-build theme
+				if(!fv || fv == 1) loadCSS('atcss/at-reveal-theme-bundler.min.css')
+			}
+
+			function initDeck(deck){
+				var metaHTML = deck.get('metaHTML')
+				var $YSContainer = document.getElementById('YSContainer')
+				$YSContainer.innerHTML = metaHTML;
+
+				// Now we have $YS.
+				window.$YS = document.getElementById('YS')
+				window._ys = function(key){
+					return $YS.getAttribute('data-ys-' + key)
+				}
+
+				// hotfix format version
+				hotfixVersion()
+
+				// init
+				initTitle()
+				initReveal()
+				dismissLoading()
+			}
+
+			function initYS(){
+				var deckId = searchToObject().deck
+				if(!deckId) {
+					console.log('init failed')
+					renderError();
+					return;
+				}
+
+				AV.initialize(
+					'im99VNboLC4mtFOCDlR3q6hT-gzGzoHsz',
+					'Hvnep5LAWmhJATEVaRb9S4Os'
+				);
+
+				var query = new AV.Query('YSDeck');
+				query.get(deckId).then(function(deck){
+					initDeck(deck)
+				}, function(error){
+					renderError();
+				})
+			}
+
+			initYS();
+		</script>
+
+		<script>
+	    (function(i,s,o,g,r,a,m){i['GoogleAnalyticsObject']=r;i[r]=i[r]||function(){
+	    (i[r].q=i[r].q||[]).push(arguments)},i[r].l=1*new Date();a=s.createElement(o),
+	    m=s.getElementsByTagName(o)[0];a.async=1;a.src=g;m.parentNode.insertBefore(a,m)
+	    })(window,document,'script','https://www.google-analytics.com/analytics.js','ga');
+
+	    ga('create', 'UA-78596200-1', 'auto');
+	    ga('send', 'pageview');
+	  </script>
+
+	</body>
+</html>
