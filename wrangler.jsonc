@@ -1,0 +1,43 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "yanshuo",
+  "main": "src/index.js",
+  "compatibility_date": "2025-09-01",
+
+  // The compiled site from Huxpro/airtalk main (Node 22, npm run build).
+  // Static files are served directly; only the API paths hit the Worker.
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": ["/1.1/*", "/__admin/*"]
+  },
+
+  // Users + deck index. Create with `npx wrangler d1 create yanshuo`
+  // and paste the printed database_id here.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "yanshuo",
+      "database_id": "0cb52693-af1b-472e-957b-d2a2e23f15e7",
+      "migrations_dir": "migrations"
+    }
+  ],
+
+  // Deck bodies (`metadata` / `metaHTML`). Images and videos are inlined as
+  // base64, so a single deck can be tens of MB, beyond D1's 2 MB row limit.
+  // Create with `npx wrangler r2 bucket create yanshuo-decks`.
+  "r2_buckets": [
+    {
+      "binding": "BUCKET",
+      "bucket_name": "yanshuo-decks"
+    }
+  ],
+
+  "observability": { "enabled": true }
+
+  // After the first deploy, attach the domain (DNS is already on Cloudflare):
+  // "routes": [
+  //   { "pattern": "yanshuo.io", "custom_domain": true },
+  //   { "pattern": "www.yanshuo.io", "custom_domain": true }
+  // ]
+}
