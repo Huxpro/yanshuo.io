@@ -152,6 +152,9 @@
 			<!-- async content -->
 		</div>
 
+		<!-- Backend configuration (window.YANSHUO_CONFIG), generated at build time -->
+		<script src="config.js"></script>
+
 		<!-- dependencies -->
 		<script src="lib/js/head.min.js"></script>
 		<script src="js/reveal.min.js"></script>
@@ -260,9 +263,15 @@
 					return;
 				}
 
-				// Served by the Worker in src/index.js (LeanCloud-compatible API)
+				// GET the deck from the LeanCloud-compatible REST API (see config.js).
+				var config = window.YANSHUO_CONFIG || {};
+				var serverURL = config.serverURL || '/';
+				if (serverURL.charAt(serverURL.length - 1) !== '/') serverURL += '/';
+
 				var xhr = new XMLHttpRequest();
-				xhr.open('GET', '/1.1/classes/YSDeck/' + encodeURIComponent(deckId) + '?keys=metaHTML');
+				xhr.open('GET', serverURL + '1.1/classes/YSDeck/' + encodeURIComponent(deckId) + '?keys=metaHTML');
+				if (config.appId) xhr.setRequestHeader('X-LC-Id', config.appId);
+				if (config.appKey) xhr.setRequestHeader('X-LC-Key', config.appKey);
 				xhr.onload = function(){
 					var deck = null;
 					try { deck = JSON.parse(xhr.responseText) } catch (e) {}

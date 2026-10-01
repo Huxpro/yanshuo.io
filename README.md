@@ -6,7 +6,7 @@
 **2027-01-12 停止服务**（[公告](https://docs.leancloud.cn/sdk/announcements/sunset-export/)）。
 
 ```
-public/                    线上编译产物（与 Huxpro/airtalk 的 gh-pages 分支一致，原始源码已不在 GitHub 上）
+public/                    Huxpro/airtalk main 的 dist/ 构建产物（同源 Worker API）
 src/index.js               Cloudflare Worker：静态资源 + 兼容 LeanCloud REST 的 /1.1/* API
 src/password.js            密码哈希（PBKDF2，兼容校验 LeanCloud 导出的旧哈希）
 migrations/                D1 表结构
@@ -50,12 +50,13 @@ CPU 上限是 30 秒，每月含 1000 万次请求，对这个站点来说绰绰
 
 ## 迁移方案
 
-思路是**最小化改动编译产物**：在 Worker 里实现 LeanCloud REST API 中 yanshuo.io 实际用到的那一小部分，
-前端继续用打包好的 LeanCloud SDK，只把服务器地址改成同域 `/`。
+前端源码已恢复到 `Huxpro/airtalk` 的 `main` 分支。使用 Node 22 执行
+`npm ci && npm run build`，将生成的 `dist/` 完整复制到本仓库的 `public/`。
+当前产物来自提交 `25fbac29f623671b7720b0d45859839b71a24903`。
 
-- `public/js/shared-7e86e14f.js`：`AV.serverURL` 从 `https://api.leancloud.cn` 改成 `/`，
-  分享链接改成 https。（改动前的原始镜像是上一个提交）
-- `public/assets/player/index.html`：去掉失效的 `cdn1.lncld.net` SDK，改用 XHR 读取 `/1.1/classes/YSDeck/:id`。
+- 编辑器继续使用 LeanCloud SDK，通过默认的 `VITE_SERVER_URL=/` 同源调用 Worker。
+- `public/assets/player/config.js` 的 `serverURL` 同样为 `/`，旧分享链接保持兼容。
+- 上面的现状调研记录的是切换前的旧站；本分支提供源码重新构建的前端。
 - 存储：`_User` 和 `YSDeck` 的索引放在 D1；`metadata` / `metaHTML` 放在 R2（`decks/<id>/<field>`），
   因为 D1 单行最大 2 MB。
 - **保持兼容**：
@@ -105,6 +106,7 @@ ADMIN_TOKEN=... npm run import -- --target https://yanshuo.<account>.workers.dev
   --users export/_User.0.jsonl --decks export/YSDeck.0.jsonl   # 文件名以实际导出的为准，也可以直接传目录
 ```
 
+脚本支持控制台 JSONL 导出的 `#filetype` 格式头（不计为数据记录）。
 脚本可以重复执行（按 objectId upsert），最后会打印服务器上的用户数和演说数，拿来和 LeanCloud 控制台里的
 数量核对一下。导入完成后建议删掉这个 secret：`npx wrangler secret delete ADMIN_TOKEN`。
 

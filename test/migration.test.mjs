@@ -9,10 +9,18 @@ import { spawn, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 
-const PORT = 8790 + Math.floor(Math.random() * 100);
+// Ask the OS for a free port instead of colliding with local parity workers.
+const portReservation = createServer();
+await new Promise((resolve, reject) => {
+  portReservation.once('error', reject);
+  portReservation.listen(0, '127.0.0.1', resolve);
+});
+const PORT = portReservation.address().port;
+await new Promise((resolve, reject) => portReservation.close((err) => err ? reject(err) : resolve()));
 const BASE = `http://127.0.0.1:${PORT}`;
 const ADMIN_TOKEN = 'test-admin-token';
 const dir = mkdtempSync(join(tmpdir(), 'yanshuo-test-'));
@@ -71,11 +79,13 @@ before(async () => {
   const persist = join(dir, 'state');
   execFileSync('npx', ['wrangler', 'd1', 'migrations', 'apply', 'yanshuo', '--local', '--persist-to', persist], { stdio: 'ignore' });
   writeFileSync(join(dir, 'users.json'), JSON.stringify({ results: [legacyUser] }));
-  writeFileSync(join(dir, 'decks.jsonl'), legacyDecks.map((d) => JSON.stringify(d)).join('\n'));
+  writeFileSync(join(dir, 'decks.jsonl'), '#filetype:JSON-streaming\n' + legacyDecks.map((d) => JSON.stringify(d)).join('\n'));
   server = spawn('npx', ['wrangler', 'dev', '--port', String(PORT), '--ip', '127.0.0.1', '--persist-to', persist, '--var', `ADMIN_TOKEN:${ADMIN_TOKEN}`], { stdio: 'ignore', detached: true });
   for (let i = 0; i < 120; i++) {
+    if (server.exitCode !== null) throw new Error(`wrangler exited: ${server.exitCode}`);
     try {
-      if ((await fetch(BASE)).ok) return;
+      const res = await fetch(`${BASE}/__admin/stats`, { headers: { Authorization: `Bearer ${ADMIN_TOKEN}` } });
+      if (res.ok) return;
     } catch {}
     await new Promise((r) => setTimeout(r, 500));
   }

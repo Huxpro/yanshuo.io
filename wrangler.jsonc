@@ -4,7 +4,7 @@
   "main": "src/index.js",
   "compatibility_date": "2025-09-01",
 
-  // The compiled site (mirrored from the old GitHub Pages deployment).
+  // The compiled site from Huxpro/airtalk main (Node 22, npm run build).
   // Static files are served directly; only the API paths hit the Worker.
   "assets": {
     "directory": "./public",

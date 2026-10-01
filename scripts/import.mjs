@@ -95,6 +95,10 @@ function readRecords(path) {
     if (Array.isArray(data.results)) return data.results;
     return [data];
   } catch {
-    return text.split('\n').filter((line) => line.trim()).map((line) => JSON.parse(line));
+    // Console JSONL exports begin with a #filetype / schema header.
+    // It describes the export format, not a database record.
+    return text.split('\n')
+      .filter((line) => line.trim() && !line.trimStart().startsWith('#'))
+      .map((line) => JSON.parse(line));
   }
 }
