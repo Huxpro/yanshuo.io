@@ -18,7 +18,7 @@
     {
       "binding": "DB",
       "database_name": "yanshuo",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "0cb52693-af1b-472e-957b-d2a2e23f15e7",
       "migrations_dir": "migrations"
     }
   ],
