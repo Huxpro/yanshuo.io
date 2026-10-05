@@ -120,6 +120,33 @@ test('upload and library enforce owner, type, and declared size', async () => {
   assert.equal((await fetch(mediaUrl)).status, 404);
 });
 
+test('discarding an orphan upload is owner-only and releases quota once', async () => {
+  const newDeck = (await api('classes/YSDeck', 'POST', { metadata: '{}' }, owner.sessionToken)).body;
+  const bytes = Uint8Array.from([1, 2, 3, 4]);
+  const upload = await fetch(`${base}/1.1/media?deckId=${newDeck.objectId}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'image/png', 'X-LC-Session': owner.sessionToken },
+    body: bytes,
+  });
+  assert.equal(upload.status, 201);
+  const media = await upload.json();
+  const remove = (token) => fetch(media.url, {
+    method: 'DELETE',
+    headers: token ? { 'X-LC-Session': token } : {},
+  });
+  assert.equal((await remove()).status, 401);
+  assert.equal((await remove(other.sessionToken)).status, 403);
+  assert.equal((await fetch(media.url)).status, 200);
+  const removed = await Promise.all([remove(owner.sessionToken), remove(owner.sessionToken)]);
+  assert.ok(removed.every((response) => [204, 404].includes(response.status)));
+  assert.ok(removed.some((response) => response.status === 204));
+  const listing = await api(`media?deckId=${newDeck.objectId}`, 'GET', null, owner.sessionToken);
+  assert.equal(listing.status, 200);
+  assert.equal(listing.body.bytes, 0, 'concurrent delete releases the reservation only once');
+  assert.deepEqual(listing.body.results, []);
+  assert.equal((await fetch(media.url)).status, 404);
+});
+
 test('deleting a deck during a streamed upload cancels the media object', async () => {
   const newDeck = (await api('classes/YSDeck', 'POST', { metadata: '{}' }, owner.sessionToken)).body;
   const url = `${base}/1.1/media?deckId=${newDeck.objectId}`;
