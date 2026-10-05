@@ -315,6 +315,7 @@ async function listMedia(request, env, url) {
   if (deck.pubUserId !== user.objectId) throw forbidden();
   await reapExpiredMediaUploads(env, deckId);
   const usage = await getDeckRow(env, deckId);
+  if (!usage) throw notFound();
   const { results } = await env.DB.prepare(
     "SELECT objectId, mime, bytes, createdAt FROM media WHERE deckId = ? AND status = 'ready' ORDER BY createdAt DESC",
   ).bind(deckId).all();
@@ -352,10 +353,12 @@ async function uploadMedia(request, env, url) {
   const key = `media/${deckId}/${id}`;
   const now = new Date().toISOString();
   let streamed = 0;
+  let inserted = false;
   try {
     await env.DB.prepare(
       'INSERT INTO media (objectId, deckId, ownerId, key, mime, bytes, status, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
     ).bind(id, deckId, user.objectId, key, mime, bytes, 'uploading', now).run();
+    inserted = true;
 
     const bounded = request.body.pipeThrough(new TransformStream({
       transform(chunk, controller) {
@@ -374,12 +377,22 @@ async function uploadMedia(request, env, url) {
     if (streamed !== bytes || object.size !== bytes) {
       throw new LCError(400, 107, 'Media size differs from declared size.');
     }
-    await env.DB.prepare("UPDATE media SET status = 'ready' WHERE objectId = ?").bind(id).run();
+    const completed = await env.DB.prepare(
+      "UPDATE media SET status = 'ready' WHERE objectId = ? AND status = 'uploading'",
+    ).bind(id).run();
+    // A concurrent deck deletion or abandoned-upload reaper may have removed
+    // the reservation while R2 was still receiving the stream.
+    if (!completed.meta.changes) throw new LCError(409, 107, 'Media upload was cancelled.');
     return json({ objectId: id, url: `${url.origin}/1.1/media/${id}`, mime, bytes, createdAt: now }, 201);
   } catch (error) {
     await env.BUCKET.delete(key);
-    await env.DB.prepare('DELETE FROM media WHERE objectId = ?').bind(id).run();
-    await env.DB.prepare('UPDATE decks SET media_bytes = media_bytes - ? WHERE objectId = ?').bind(bytes, deckId).run();
+    const removed = await env.DB.prepare('DELETE FROM media WHERE objectId = ?').bind(id).run();
+    // If another request already removed the reservation, it also released
+    // these bytes. An INSERT failure still needs to release its reservation.
+    if (!inserted || removed.meta.changes) {
+      await env.DB.prepare('UPDATE decks SET media_bytes = media_bytes - ? WHERE objectId = ?')
+        .bind(bytes, deckId).run();
+    }
     if (error instanceof LCError) throw error;
     if (streamed !== bytes) throw new LCError(400, 107, 'Media size differs from declared size.');
     throw error;

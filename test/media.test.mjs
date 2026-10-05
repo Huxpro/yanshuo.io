@@ -119,3 +119,42 @@ test('upload and library enforce owner, type, and declared size', async () => {
   assert.equal((await api(`classes/YSDeck/${deckId}`, 'DELETE', null, owner.sessionToken)).status, 200);
   assert.equal((await fetch(mediaUrl)).status, 404);
 });
+
+test('deleting a deck during a streamed upload cancels the media object', async () => {
+  const newDeck = (await api('classes/YSDeck', 'POST', { metadata: '{}' }, owner.sessionToken)).body;
+  const url = `${base}/1.1/media?deckId=${newDeck.objectId}`;
+  const bytes = Uint8Array.from([1, 2, 3, 4, 5, 6, 7, 8]);
+  let send;
+  const body = new ReadableStream({
+    start(controller) {
+      send = controller;
+      controller.enqueue(bytes.slice(0, 1));
+    },
+  });
+  const upload = fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'image/png',
+      'X-LC-Session': owner.sessionToken,
+      'X-Media-Bytes': String(bytes.length),
+    },
+    body,
+    duplex: 'half',
+  });
+  let reserved = false;
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const listing = await api(`media?deckId=${newDeck.objectId}`, 'GET', null, owner.sessionToken);
+    if (listing.body.bytes === bytes.length) {
+      reserved = true;
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.ok(reserved, `upload did not reserve space before deck deletion:\n${logs}`);
+  assert.equal((await api(`classes/YSDeck/${newDeck.objectId}`, 'DELETE', null, owner.sessionToken)).status, 200);
+  send.enqueue(bytes.slice(1));
+  send.close();
+  const response = await upload;
+  assert.equal(response.status, 409, await response.text());
+  assert.equal((await api(`media?deckId=${newDeck.objectId}`, 'GET', null, owner.sessionToken)).status, 404);
+});
