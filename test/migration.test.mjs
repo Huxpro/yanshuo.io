@@ -10,9 +10,16 @@ import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createServer } from 'node:net';
 import { after, before, test } from 'node:test';
 
-const PORT = 8790 + Math.floor(Math.random() * 100);
+const PORT = await new Promise((resolve) => {
+  const listener = createServer();
+  listener.listen(0, '127.0.0.1', () => {
+    const free = listener.address().port;
+    listener.close(() => resolve(free));
+  });
+});
 const BASE = `http://127.0.0.1:${PORT}`;
 const ADMIN_TOKEN = 'test-admin-token';
 const dir = mkdtempSync(join(tmpdir(), 'yanshuo-test-'));
