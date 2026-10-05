@@ -294,8 +294,9 @@ async function handleMedia(request, env, url) {
   if (url.pathname === '/1.1/media') {
     if (request.method === 'POST') return uploadMedia(request, env, url);
     if (request.method === 'GET') return listMedia(request, env, url);
-  } else if (/^[0-9a-f]{24}$/.test(id) && ['GET', 'HEAD'].includes(request.method)) {
-    return serveMedia(request, env, id);
+  } else if (/^[0-9a-f]{24}$/.test(id)) {
+    if (['GET', 'HEAD'].includes(request.method)) return serveMedia(request, env, id);
+    if (request.method === 'DELETE') return deleteMedia(request, env, id);
   }
   throw notFound();
 }
@@ -415,6 +416,29 @@ async function reapExpiredMediaUploads(env, deckId) {
       .bind(row.bytes, deckId).run();
     await env.BUCKET.delete(row.key);
   }
+}
+
+// A newly uploaded object can outlive the editor request that selected it
+// (for example when the user switches decks during the upload). The owner can
+// discard that unreferenced object without deleting the entire deck. Remove
+// R2 first so a failed delete leaves a retriable D1 row and reservation.
+async function deleteMedia(request, env, id) {
+  const user = await mediaUser(request, env);
+  const row = await env.DB.prepare(
+    'SELECT deckId, ownerId, key, bytes, status FROM media WHERE objectId = ?',
+  ).bind(id).first();
+  if (!row) throw notFound();
+  if (row.ownerId !== user.objectId) throw forbidden();
+  if (row.status !== 'ready') throw new LCError(409, 107, 'Media upload is not complete.');
+  await env.BUCKET.delete(row.key);
+  const removed = await env.DB.prepare(
+    "DELETE FROM media WHERE objectId = ? AND ownerId = ? AND status = 'ready'",
+  ).bind(id, user.objectId).run();
+  if (removed.meta.changes) {
+    await env.DB.prepare('UPDATE decks SET media_bytes = media_bytes - ? WHERE objectId = ?')
+      .bind(row.bytes, row.deckId).run();
+  }
+  return new Response(null, { status: 204, headers: CORS_HEADERS });
 }
 
 async function serveMedia(request, env, id) {
