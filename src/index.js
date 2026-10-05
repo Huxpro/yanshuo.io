@@ -19,6 +19,13 @@ const DECK_CLASS = 'YSDeck';
 const BLOB_FIELDS = new Set(['metadata', 'metaHTML']);
 const RESERVED_FIELDS = new Set(['objectId', 'createdAt', 'updatedAt', 'ACL']);
 const MAX_QUERY_LIMIT = 1000;
+const MAX_IMAGE_BYTES = 12 * 1024 * 1024;
+const MAX_VIDEO_BYTES = 24 * 1024 * 1024;
+const MAX_DECK_MEDIA_BYTES = 100 * 1024 * 1024;
+const MEDIA_TYPES = new Set([
+  'image/avif', 'image/gif', 'image/heic', 'image/heif', 'image/jpeg',
+  'image/png', 'image/webp', 'video/mp4', 'video/quicktime', 'video/webm',
+]);
 
 export default {
   async fetch(request, env) {
@@ -53,6 +60,10 @@ const loginRequired = () => new LCError(401, 403, 'Please log in first.');
 
 async function handleApi(request, env, url) {
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS_HEADERS });
+  // Media bodies must remain streams; parseApiRequest() reads JSON bodies.
+  if (url.pathname === '/1.1/media' || url.pathname.startsWith('/1.1/media/')) {
+    return handleMedia(request, env, url);
+  }
 
   const req = await parseApiRequest(request, url);
   const path = url.pathname.slice('/1.1/'.length).split('/').filter(Boolean).map(decodeURIComponent);
@@ -265,10 +276,169 @@ async function deleteDeck(env, { user }, id) {
   const row = await getDeckRow(env, id);
   if (!row) return json({});
   if (row.pubUserId !== user.objectId) throw forbidden('Forbidden to delete by ACL.');
+  const media = await env.DB.prepare('SELECT key FROM media WHERE deckId = ?').bind(id).all();
+  await env.DB.prepare('DELETE FROM media WHERE deckId = ?').bind(id).run();
   await env.DB.prepare('DELETE FROM decks WHERE objectId = ?').bind(id).run();
-  const blobs = JSON.parse(row.blob_fields).map((f) => blobKey(id, f));
+  const blobs = [
+    ...JSON.parse(row.blob_fields).map((f) => blobKey(id, f)),
+    ...media.results.map((item) => item.key),
+  ];
   if (blobs.length) await env.BUCKET.delete(blobs);
   return json({});
+}
+
+// --- separately stored deck media -----------------------------------------
+
+async function handleMedia(request, env, url) {
+  const id = url.pathname.slice('/1.1/media/'.length);
+  if (url.pathname === '/1.1/media') {
+    if (request.method === 'POST') return uploadMedia(request, env, url);
+    if (request.method === 'GET') return listMedia(request, env, url);
+  } else if (/^[0-9a-f]{24}$/.test(id) && ['GET', 'HEAD'].includes(request.method)) {
+    return serveMedia(request, env, id);
+  }
+  throw notFound();
+}
+
+async function mediaUser(request, env) {
+  const user = await findUserBySession(env, request.headers.get('X-LC-Session'));
+  if (!user) throw loginRequired();
+  return user;
+}
+
+async function listMedia(request, env, url) {
+  const user = await mediaUser(request, env);
+  const deckId = url.searchParams.get('deckId');
+  if (!deckId) throw new LCError(400, 107, 'deckId is required.');
+  const deck = await getDeckRow(env, deckId);
+  if (!deck) throw notFound();
+  if (deck.pubUserId !== user.objectId) throw forbidden();
+  await reapExpiredMediaUploads(env, deckId);
+  const usage = await getDeckRow(env, deckId);
+  if (!usage) throw notFound();
+  const { results } = await env.DB.prepare(
+    "SELECT objectId, mime, bytes, createdAt FROM media WHERE deckId = ? AND status = 'ready' ORDER BY createdAt DESC",
+  ).bind(deckId).all();
+  return json({ results: results.map((row) => ({ ...row, url: `${url.origin}/1.1/media/${row.objectId}` })),
+    bytes: usage.media_bytes, limit: MAX_DECK_MEDIA_BYTES });
+}
+
+async function uploadMedia(request, env, url) {
+  const user = await mediaUser(request, env);
+  const deckId = url.searchParams.get('deckId');
+  if (!deckId) throw new LCError(400, 107, 'deckId is required.');
+  const deck = await getDeckRow(env, deckId);
+  if (!deck) throw notFound();
+  if (deck.pubUserId !== user.objectId) throw forbidden();
+  await reapExpiredMediaUploads(env, deckId);
+
+  const mime = (request.headers.get('Content-Type') || '').split(';')[0].trim().toLowerCase();
+  if (!MEDIA_TYPES.has(mime)) throw new LCError(415, 107, 'Unsupported image or video type.');
+  const max = mime.startsWith('image/') ? MAX_IMAGE_BYTES : MAX_VIDEO_BYTES;
+  // A browser File upload supplies Content-Length; X-Media-Bytes supports
+  // runtimes that stream without it. The R2 result is checked against this
+  // declaration, and the stream itself is capped below.
+  const declared = request.headers.get('Content-Length') || request.headers.get('X-Media-Bytes');
+  const bytes = Number(declared);
+  if (!Number.isSafeInteger(bytes) || bytes < 1) throw new LCError(411, 107, 'Media size is required.');
+  if (bytes > max) throw new LCError(413, 107, 'Media file is too large.');
+  if (!request.body) throw new LCError(400, 107, 'Media body is required.');
+
+  const reservation = await env.DB.prepare(
+    'UPDATE decks SET media_bytes = media_bytes + ? WHERE objectId = ? AND pubUserId = ? AND media_bytes + ? <= ?',
+  ).bind(bytes, deckId, user.objectId, bytes, MAX_DECK_MEDIA_BYTES).run();
+  if (!reservation.meta.changes) throw new LCError(413, 107, 'Deck media storage is full.');
+
+  const id = newObjectId();
+  const key = `media/${deckId}/${id}`;
+  const now = new Date().toISOString();
+  let streamed = 0;
+  let inserted = false;
+  try {
+    await env.DB.prepare(
+      'INSERT INTO media (objectId, deckId, ownerId, key, mime, bytes, status, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    ).bind(id, deckId, user.objectId, key, mime, bytes, 'uploading', now).run();
+    inserted = true;
+
+    const bounded = request.body.pipeThrough(new TransformStream({
+      transform(chunk, controller) {
+        streamed += chunk.byteLength;
+        if (streamed > bytes || streamed > max) throw new Error('Media size differs from declared size.');
+        controller.enqueue(chunk);
+      },
+    }));
+    // R2 requires a stream with a known length. FixedLengthStream also rejects
+    // a truncated body without keeping the whole file in Worker memory.
+    const { readable, writable } = new FixedLengthStream(bytes);
+    const [object] = await Promise.all([
+      env.BUCKET.put(key, readable, { httpMetadata: { contentType: mime } }),
+      bounded.pipeTo(writable),
+    ]);
+    if (streamed !== bytes || object.size !== bytes) {
+      throw new LCError(400, 107, 'Media size differs from declared size.');
+    }
+    const completed = await env.DB.prepare(
+      "UPDATE media SET status = 'ready' WHERE objectId = ? AND status = 'uploading'",
+    ).bind(id).run();
+    // A concurrent deck deletion or abandoned-upload reaper may have removed
+    // the reservation while R2 was still receiving the stream.
+    if (!completed.meta.changes) throw new LCError(409, 107, 'Media upload was cancelled.');
+    return json({ objectId: id, url: `${url.origin}/1.1/media/${id}`, mime, bytes, createdAt: now }, 201);
+  } catch (error) {
+    await env.BUCKET.delete(key);
+    const removed = await env.DB.prepare('DELETE FROM media WHERE objectId = ?').bind(id).run();
+    // If another request already removed the reservation, it also released
+    // these bytes. An INSERT failure still needs to release its reservation.
+    if (!inserted || removed.meta.changes) {
+      await env.DB.prepare('UPDATE decks SET media_bytes = media_bytes - ? WHERE objectId = ?')
+        .bind(bytes, deckId).run();
+    }
+    if (error instanceof LCError) throw error;
+    if (streamed !== bytes) throw new LCError(400, 107, 'Media size differs from declared size.');
+    throw error;
+  }
+}
+
+// A Worker can be interrupted after reserving deck space. Reclaim only
+// uploads older than an hour; completed objects are never touched.
+async function reapExpiredMediaUploads(env, deckId) {
+  const cutoff = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  const { results } = await env.DB.prepare(
+    "SELECT objectId, key, bytes FROM media WHERE deckId = ? AND status = 'uploading' AND createdAt < ?",
+  ).bind(deckId, cutoff).all();
+  for (const row of results) {
+    const deleted = await env.DB.prepare(
+      "DELETE FROM media WHERE objectId = ? AND status = 'uploading' AND createdAt < ?",
+    ).bind(row.objectId, cutoff).run();
+    if (!deleted.meta.changes) continue;
+    await env.DB.prepare('UPDATE decks SET media_bytes = media_bytes - ? WHERE objectId = ?')
+      .bind(row.bytes, deckId).run();
+    await env.BUCKET.delete(row.key);
+  }
+}
+
+async function serveMedia(request, env, id) {
+  const row = await env.DB.prepare(
+    "SELECT key, mime, bytes FROM media WHERE objectId = ? AND status = 'ready'",
+  ).bind(id).first();
+  if (!row) throw notFound();
+  const object = await env.BUCKET.get(row.key, { range: request.headers });
+  if (!object) throw notFound();
+  const headers = new Headers({
+    ...CORS_HEADERS,
+    'Access-Control-Expose-Headers': 'Accept-Ranges, Content-Length, Content-Range',
+    'Accept-Ranges': 'bytes',
+    'Cache-Control': 'public, max-age=31536000, immutable',
+    'Content-Type': row.mime,
+    'Content-Length': String(object.range?.length ?? object.size),
+    'Cross-Origin-Resource-Policy': 'cross-origin',
+    'X-Content-Type-Options': 'nosniff',
+  });
+  if (object.range && request.headers.has('Range')) {
+    headers.set('Content-Range', `bytes ${object.range.offset}-${object.range.offset + object.range.length - 1}/${object.size}`);
+  }
+  const status = headers.has('Content-Range') ? 206 : 200;
+  return new Response(request.method === 'HEAD' ? null : object.body, { status, headers });
 }
 
 // Supports what the app and SDK send: equality on `objectId` (AV.Query#get)
@@ -487,7 +657,7 @@ async function importDecks(env, records) {
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, X-LC-Id, X-LC-Key, X-LC-Session',
+  'Access-Control-Allow-Headers': 'Content-Type, X-LC-Id, X-LC-Key, X-LC-Session, X-Media-Bytes',
   'Access-Control-Max-Age': '86400',
 };
 
