@@ -141,3 +141,22 @@ npm test             # 迁移端到端测试：导入 → 老密码登录 → �
 
 SDK 0.6.x 的请求格式是 `POST` + `text/plain` JSON，方法、会话等信息放在 `_method`、`_SessionToken` 字段里；
 标准 REST 请求（真实 HTTP 方法 + `X-LC-Session` 头）也同样支持。其他路由统一返回 `119`。
+
+## Isolated staging for airtalk previews
+
+`wrangler.staging.jsonc` deploys `yanshuo-staging.huxpro.workers.dev` with its own
+D1 database (`yanshuo-staging`) and R2 bucket (`yanshuo-staging-decks`). It never
+binds the migrated `yanshuo` resources. No real users, sessions or password hashes
+are copied into staging, and no `ADMIN_TOKEN` is configured. Create test accounts
+through the regular signup API/UI.
+
+```sh
+npx wrangler d1 migrations apply yanshuo-staging --remote --config wrangler.staging.jsonc
+npx wrangler deploy --config wrangler.staging.jsonc
+```
+
+The static player is served by this Worker and reads its same-origin staging
+API. The airtalk Pages project points its default API and player URLs here.
+Production selection in the frontend developer tool explicitly points to the
+migrated `yanshuo.huxpro.workers.dev` backend. This configuration does not change
+production DNS, GitHub Pages, or the original Worker deployment.
