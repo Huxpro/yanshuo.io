@@ -40,6 +40,9 @@ export default {
     }
     return env.ASSETS.fetch(request);
   },
+  async scheduled(_event, env) {
+    await reapExpiredStagedMedia(env);
+  },
 };
 
 class LCError extends Error {
@@ -243,15 +246,58 @@ async function getDeck(env, { params }, id) {
 async function createDeck(env, { user, data }) {
   if (!user) throw loginRequired();
   if (data.pubUserId != null && data.pubUserId !== user.objectId) throw forbidden();
+  const stagedIds = data.stagedMediaIds || [];
+  if (!Array.isArray(stagedIds) || stagedIds.length > 64 ||
+      new Set(stagedIds).size !== stagedIds.length ||
+      stagedIds.some((id) => typeof id !== 'string' || !/^[0-9a-f]{24}$/.test(id))) {
+    throw new LCError(400, 107, 'Invalid staged media ids.');
+  }
+  let staged = [];
+  if (stagedIds.length) {
+    if (typeof data.metadata !== 'string') throw new LCError(400, 107, 'Deck metadata is required.');
+    const cutoff = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    const found = await env.DB.prepare(
+      `SELECT objectId, ownerId, key, mime, bytes FROM staged_media
+       WHERE ownerId = ? AND status = 'ready' AND createdAt >= ?
+         AND objectId IN (${stagedIds.map(() => '?').join(',')})`,
+    ).bind(user.objectId, cutoff, ...stagedIds).all();
+    staged = found.results;
+    if (staged.length !== stagedIds.length) throw new LCError(409, 107, 'Staged media is unavailable.');
+    for (const id of stagedIds) {
+      if (!data.metadata.includes(`/1.1/media/${id}`)) {
+        throw new LCError(400, 107, 'Staged media is missing from deck metadata.');
+      }
+    }
+  }
+  const mediaBytes = staged.reduce((sum, item) => sum + item.bytes, 0);
+  if (mediaBytes > MAX_DECK_MEDIA_BYTES) throw new LCError(413, 107, 'Deck media storage is full.');
+  const fields = { ...data };
+  delete fields.stagedMediaIds;
   const now = new Date().toISOString();
   const row = { objectId: newObjectId(), pubUserId: user.objectId, blob_fields: '[]', extra: '{}', createdAt: now, updatedAt: now };
-  applyDeckChanges(row, data);
-  await putBlobs(env, row.objectId, data);
-  await env.DB.prepare(
-    'INSERT INTO decks (objectId, pubUserId, blob_fields, extra, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?)',
-  )
-    .bind(row.objectId, row.pubUserId, row.blob_fields, row.extra, row.createdAt, row.updatedAt)
-    .run();
+  applyDeckChanges(row, fields);
+  const statements = [env.DB.prepare(
+    'INSERT INTO decks (objectId, pubUserId, blob_fields, extra, media_bytes, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?)',
+  ).bind(row.objectId, row.pubUserId, row.blob_fields, row.extra, mediaBytes, row.createdAt, row.updatedAt)];
+  for (const item of staged) {
+    statements.push(env.DB.prepare(
+      "INSERT INTO media (objectId, deckId, ownerId, key, mime, bytes, status, createdAt) VALUES (?, ?, ?, ?, ?, ?, 'ready', ?)",
+    ).bind(item.objectId, row.objectId, item.ownerId, item.key, item.mime, item.bytes, now));
+    statements.push(env.DB.prepare('DELETE FROM staged_media WHERE objectId = ? AND ownerId = ?')
+      .bind(item.objectId, user.objectId));
+  }
+  try {
+    await putBlobs(env, row.objectId, fields);
+    await env.DB.batch(statements);
+  } catch (error) {
+    // The D1 batch rolls back, but R2 is not part of that transaction.
+    try {
+      await env.BUCKET.delete([...BLOB_FIELDS].map((field) => blobKey(row.objectId, field)));
+    } catch (cleanupError) {
+      console.warn('Failed to remove orphaned deck blobs:', cleanupError);
+    }
+    throw error;
+  }
   return json({ objectId: row.objectId, createdAt: now, updatedAt: now }, 201);
 }
 
@@ -291,6 +337,12 @@ async function deleteDeck(env, { user }, id) {
 
 async function handleMedia(request, env, url) {
   const id = url.pathname.slice('/1.1/media/'.length);
+  if (url.pathname === '/1.1/media/staged' && request.method === 'POST') {
+    return uploadStagedMedia(request, env, url);
+  }
+  if (/^staged\/[0-9a-f]{24}$/.test(id) && request.method === 'DELETE') {
+    return deleteStagedMedia(request, env, id.slice('staged/'.length));
+  }
   if (url.pathname === '/1.1/media') {
     if (request.method === 'POST') return uploadMedia(request, env, url);
     if (request.method === 'GET') return listMedia(request, env, url);
@@ -322,6 +374,98 @@ async function listMedia(request, env, url) {
   ).bind(deckId).all();
   return json({ results: results.map((row) => ({ ...row, url: `${url.origin}/1.1/media/${row.objectId}` })),
     bytes: usage.media_bytes, limit: MAX_DECK_MEDIA_BYTES });
+}
+
+// Guest decks cannot first save metadata containing many base64 media copies:
+// it may exceed the edge request cap before their R2 uploads can begin. Stage
+// each file as a bounded stream under the authenticated user, then atomically
+// attach all ready objects to the deck during its small metadata create.
+async function uploadStagedMedia(request, env, url) {
+  const user = await mediaUser(request, env);
+  await reapExpiredStagedMedia(env, user.objectId);
+
+  const mime = (request.headers.get('Content-Type') || '').split(';')[0].trim().toLowerCase();
+  if (!MEDIA_TYPES.has(mime)) throw new LCError(415, 107, 'Unsupported image or video type.');
+  const max = mime.startsWith('image/') ? MAX_IMAGE_BYTES : MAX_VIDEO_BYTES;
+  const declared = request.headers.get('Content-Length') || request.headers.get('X-Media-Bytes');
+  const bytes = Number(declared);
+  if (!Number.isSafeInteger(bytes) || bytes < 1) throw new LCError(411, 107, 'Media size is required.');
+  if (bytes > max) throw new LCError(413, 107, 'Media file is too large.');
+  if (!request.body) throw new LCError(400, 107, 'Media body is required.');
+
+  const id = newObjectId();
+  const key = `staged/${user.objectId}/${id}`;
+  const now = new Date().toISOString();
+  const reserved = await env.DB.prepare(
+    `INSERT INTO staged_media (objectId, ownerId, key, mime, bytes, status, createdAt)
+     SELECT ?, ?, ?, ?, ?, 'uploading', ?
+     WHERE (SELECT COALESCE(SUM(bytes), 0) FROM staged_media WHERE ownerId = ?) + ? <= ?`,
+  ).bind(id, user.objectId, key, mime, bytes, now,
+    user.objectId, bytes, MAX_DECK_MEDIA_BYTES).run();
+  if (!reserved.meta.changes) throw new LCError(413, 107, 'Staged media storage is full.');
+
+  let streamed = 0;
+  try {
+    const bounded = request.body.pipeThrough(new TransformStream({
+      transform(chunk, controller) {
+        streamed += chunk.byteLength;
+        if (streamed > bytes || streamed > max) throw new Error('Media size differs from declared size.');
+        controller.enqueue(chunk);
+      },
+    }));
+    const { readable, writable } = new FixedLengthStream(bytes);
+    const [object] = await Promise.all([
+      env.BUCKET.put(key, readable, { httpMetadata: { contentType: mime } }),
+      bounded.pipeTo(writable),
+    ]);
+    if (streamed !== bytes || object.size !== bytes) {
+      throw new LCError(400, 107, 'Media size differs from declared size.');
+    }
+    const completed = await env.DB.prepare(
+      "UPDATE staged_media SET status = 'ready' WHERE objectId = ? AND status = 'uploading'",
+    ).bind(id).run();
+    if (!completed.meta.changes) throw new LCError(409, 107, 'Staged media upload was cancelled.');
+    return json({ objectId: id, url: `${url.origin}/1.1/media/${id}`, mime, bytes, createdAt: now }, 201);
+  } catch (error) {
+    await env.BUCKET.delete(key);
+    await env.DB.prepare('DELETE FROM staged_media WHERE objectId = ?').bind(id).run();
+    if (error instanceof LCError) throw error;
+    if (streamed !== bytes) throw new LCError(400, 107, 'Media size differs from declared size.');
+    throw error;
+  }
+}
+
+// Opportunistic cleanup on upload plus the hourly scheduled pass. Delete the
+// D1 reservation first; only a row actually removed here has its R2 object
+// removed, so an adopted object is never reaped as temporary media.
+async function reapExpiredStagedMedia(env, ownerId = null) {
+  const cutoff = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  const where = ownerId ? 'ownerId = ? AND createdAt < ?' : 'createdAt < ?';
+  const args = ownerId ? [ownerId, cutoff] : [cutoff];
+  const expired = await env.DB.prepare(
+    `SELECT objectId, key FROM staged_media WHERE ${where} ORDER BY createdAt LIMIT 100`,
+  ).bind(...args).all();
+  if (!expired.results.length) return;
+  const removed = await env.DB.batch(expired.results.map((item) =>
+    env.DB.prepare(`DELETE FROM staged_media WHERE objectId = ? AND ${where}`)
+      .bind(item.objectId, ...args)));
+  const keys = expired.results.filter((_, index) => removed[index].meta.changes).map((item) => item.key);
+  if (keys.length) await env.BUCKET.delete(keys);
+}
+
+async function deleteStagedMedia(request, env, id) {
+  const user = await mediaUser(request, env);
+  const row = await env.DB.prepare(
+    'SELECT ownerId, key, status FROM staged_media WHERE objectId = ?',
+  ).bind(id).first();
+  if (!row) throw notFound();
+  if (row.ownerId !== user.objectId) throw forbidden();
+  if (row.status !== 'ready') throw new LCError(409, 107, 'Staged media upload is not complete.');
+  const removed = await env.DB.prepare(
+    "DELETE FROM staged_media WHERE objectId = ? AND ownerId = ? AND status = 'ready'",
+  ).bind(id, user.objectId).run();
+  if (removed.meta.changes) await env.BUCKET.delete(row.key);
+  return new Response(null, { status: 204, headers: CORS_HEADERS });
 }
 
 async function uploadMedia(request, env, url) {
@@ -545,7 +689,7 @@ function applyDeckChanges(row, data) {
     if (value && typeof value === 'object' && value.__op && !isDelete) {
       throw new LCError(400, 1, `Unsupported operation "${value.__op}".`);
     }
-    if (key === 'pubUserId') continue; // owner is fixed at creation
+    if (key === 'pubUserId' || key === 'stagedMediaIds') continue; // owner is fixed; staged ids are create-only
     if (BLOB_FIELDS.has(key)) {
       if (isDelete || value == null) blobs.delete(key);
       else blobs.add(key);

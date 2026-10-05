@@ -33,7 +33,7 @@ async function api(path, method, body, token) {
 
 before(async () => {
   execFileSync('npx', ['wrangler', 'd1', 'migrations', 'apply', 'yanshuo', '--local', '--persist-to', persist], { stdio: 'ignore' });
-  server = spawn('npx', ['wrangler', 'dev', '--port', String(port), '--ip', '127.0.0.1', '--persist-to', persist], {
+  server = spawn('npx', ['wrangler', 'dev', '--port', String(port), '--ip', '127.0.0.1', '--persist-to', persist, '--test-scheduled'], {
     stdio: ['ignore', 'pipe', 'pipe'], detached: true,
   });
   server.stdout.on('data', (chunk) => { logs += chunk.toString(); });
@@ -92,6 +92,73 @@ test('media upload, list, and public byte-range read', async () => {
   assert.equal(range.headers.get('Content-Range'), `bytes 2-4/${bytes.length}`);
   assert.deepEqual(new Uint8Array(await range.arrayBuffer()), bytes.slice(2, 5));
 
+});
+
+test('guest media is staged before deck creation and adopted only by its owner', async () => {
+  const bytes = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 4, 3, 2, 1]);
+  const stage = await fetch(`${base}/1.1/media/staged`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'image/png', 'X-LC-Session': owner.sessionToken },
+    body: bytes,
+  });
+  assert.equal(stage.status, 201, await stage.clone().text());
+  const item = await stage.json();
+  assert.equal((await fetch(item.url)).status, 404, 'staged media is not public before adoption');
+  const metadata = JSON.stringify({ slides: [{ blocks: [{ type: 'IMG', src: item.url }] }] });
+  const payload = { metadata, stagedMediaIds: [item.objectId] };
+  assert.equal((await api('classes/YSDeck', 'POST', payload, other.sessionToken)).status, 409);
+  assert.equal((await api('classes/YSDeck', 'POST', { metadata: '{}', stagedMediaIds: [item.objectId] }, owner.sessionToken)).status, 400);
+  const created = await api('classes/YSDeck', 'POST', payload, owner.sessionToken);
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  const adopted = await api(`media?deckId=${created.body.objectId}`, 'GET', null, owner.sessionToken);
+  assert.equal(adopted.status, 200);
+  assert.equal(adopted.body.bytes, bytes.length);
+  assert.deepEqual(adopted.body.results.map((row) => row.objectId), [item.objectId]);
+  assert.deepEqual(new Uint8Array(await (await fetch(item.url)).arrayBuffer()), bytes);
+  const saved = await api(`classes/YSDeck/${created.body.objectId}`, 'GET', null, owner.sessionToken);
+  assert.equal(saved.body.metadata, metadata);
+  assert.equal(saved.body.stagedMediaIds, undefined);
+  assert.equal((await api('classes/YSDeck', 'POST', payload, owner.sessionToken)).status, 409);
+  assert.equal((await api(`classes/YSDeck/${created.body.objectId}`, 'DELETE', null, owner.sessionToken)).status, 200);
+  assert.equal((await fetch(item.url)).status, 404);
+});
+
+test('a failed guest sync can discard its staged media without touching another owner', async () => {
+  const upload = await fetch(`${base}/1.1/media/staged`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'image/png', 'X-LC-Session': owner.sessionToken },
+    body: Uint8Array.from([1, 2, 3]),
+  });
+  assert.equal(upload.status, 201);
+  const item = await upload.json();
+  const remove = (token) => fetch(`${base}/1.1/media/staged/${item.objectId}`, {
+    method: 'DELETE',
+    headers: token ? { 'X-LC-Session': token } : {},
+  });
+  assert.equal((await remove(other.sessionToken)).status, 403);
+  assert.equal((await remove(owner.sessionToken)).status, 204);
+  assert.equal((await remove(owner.sessionToken)).status, 404);
+  assert.equal((await api('classes/YSDeck', 'POST', {
+    metadata: JSON.stringify({ image: item.url }), stagedMediaIds: [item.objectId],
+  }, owner.sessionToken)).status, 409);
+});
+
+test('scheduled cleanup expires unadopted staged media', async () => {
+  const upload = await fetch(`${base}/1.1/media/staged`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'image/png', 'X-LC-Session': owner.sessionToken },
+    body: Uint8Array.from([9, 8, 7]),
+  });
+  assert.equal(upload.status, 201);
+  const item = await upload.json();
+  execFileSync('npx', ['wrangler', 'd1', 'execute', 'yanshuo', '--local', '--persist-to', persist,
+    '--command', `UPDATE staged_media SET createdAt = '2020-01-01T00:00:00.000Z' WHERE objectId = '${item.objectId}'`],
+  { stdio: 'ignore' });
+  const scheduled = await fetch(`${base}/cdn-cgi/local/scheduled?format=json`);
+  assert.equal(scheduled.status, 200, await scheduled.text());
+  assert.equal((await api('classes/YSDeck', 'POST', {
+    metadata: JSON.stringify({ image: item.url }), stagedMediaIds: [item.objectId],
+  }, owner.sessionToken)).status, 409);
 });
 
 test('upload and library enforce owner, type, and declared size', async () => {

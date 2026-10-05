@@ -33,7 +33,8 @@
     }
   ],
 
-  "observability": { "enabled": true }
+  "observability": { "enabled": true },
+  "triggers": { "crons": ["0 * * * *"] }
 
   // After the first deploy, attach the domain (DNS is already on Cloudflare):
   // "routes": [
