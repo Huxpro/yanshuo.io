@@ -1,0 +1,58 @@
+/**
+ * Bundler of every themes.
+ *
+ * By @Huxpro. https://huxpro.github.io
+ */
+
+
+[data-reveal-theme="black"], .reveal-theme-preview[data-reveal-theme="black"] {
+  @import "black";
+}
+
+[data-reveal-theme="beige"], .reveal-theme-preview[data-reveal-theme="beige"] {
+  @import "beige";
+}
+
+[data-reveal-theme="blood"], .reveal-theme-preview[data-reveal-theme="blood"] {
+  @import "blood";
+}
+
+[data-reveal-theme="league"], .reveal-theme-preview[data-reveal-theme="league"] {
+  @import "league";
+}
+
+[data-reveal-theme="moon"], .reveal-theme-preview[data-reveal-theme="moon"] {
+  @import "moon";
+}
+
+[data-reveal-theme="night"], .reveal-theme-preview[data-reveal-theme="night"] {
+  @import "night";
+}
+
+[data-reveal-theme="serif"], .reveal-theme-preview[data-reveal-theme="serif"] {
+  @import "serif";
+}
+
+[data-reveal-theme="simple"], .reveal-theme-preview[data-reveal-theme="simple"] {
+  @import "simple";
+}
+
+[data-reveal-theme="sky"], .reveal-theme-preview[data-reveal-theme="sky"] {
+  @import "sky";
+}
+
+[data-reveal-theme="solarized"], .reveal-theme-preview[data-reveal-theme="solarized"] {
+  @import "solarized";
+}
+
+[data-reveal-theme="white"], .reveal-theme-preview[data-reveal-theme="white"] {
+  @import "white";
+}
+
+[data-reveal-theme="wechat"], .reveal-theme-preview[data-reveal-theme="wechat"] {
+  @import "wechat";
+}
+
+[data-reveal-theme="mark"], .reveal-theme-preview[data-reveal-theme="mark"] {
+  @import "mark";
+}
