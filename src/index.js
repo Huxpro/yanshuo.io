@@ -13,7 +13,14 @@
 // decks and their owner-only version history.
 
 import { hashPassword, verifyPassword } from './password.js';
-import { versionPolicy, versionSize } from './versionPolicy.js';
+import {
+  CRITICAL_VERSION_REASONS,
+  VERSION_REASONS,
+  reasonEnabled,
+  versionPlanExists,
+  versionPolicy,
+  versionSize,
+} from './versionPolicy.js';
 
 const DECK_CLASS = 'YSDeck';
 const VERSION_CLASS = 'YSDeckVersion';
@@ -67,21 +74,37 @@ async function handleApi(request, env, url) {
   else if (path.length > 1) route += path[1] === 'me' ? '/me' : '/:id';
 
   switch (route) {
-    case `GET classes/${DECK_CLASS}`: return queryDecks(env, req);
-    case `POST classes/${DECK_CLASS}`: return createDeck(env, req);
-    case `GET classes/${DECK_CLASS}/:id`: return getDeck(env, req, path[2]);
-    case `PUT classes/${DECK_CLASS}/:id`: return updateDeck(env, req, path[2]);
-    case `DELETE classes/${DECK_CLASS}/:id`: return deleteDeck(env, req, path[2]);
-    case `GET classes/${VERSION_CLASS}`: return queryVersions(env, req);
-    case `POST classes/${VERSION_CLASS}`: return createVersion(env, req);
-    case `GET classes/${VERSION_CLASS}/:id`: return getVersion(env, req, path[2]);
-    case `DELETE classes/${VERSION_CLASS}/:id`: return deleteVersion(env, req, path[2]);
-    case `GET classes/${VERSION_POLICY_CLASS}`: return getVersionPolicy(env, req);
-    case 'POST users': return signUp(env, req);
+    case `GET classes/${DECK_CLASS}`:
+      return queryDecks(env, req);
+    case `POST classes/${DECK_CLASS}`:
+      return createDeck(env, req);
+    case `GET classes/${DECK_CLASS}/:id`:
+      return getDeck(env, req, path[2]);
+    case `PUT classes/${DECK_CLASS}/:id`:
+      return updateDeck(env, req, path[2]);
+    case `DELETE classes/${DECK_CLASS}/:id`:
+      return deleteDeck(env, req, path[2]);
+    case `GET classes/${VERSION_CLASS}`:
+      return queryVersions(env, req);
+    case `POST classes/${VERSION_CLASS}`:
+      return createVersion(env, req);
+    case `GET classes/${VERSION_CLASS}/:id`:
+      return getVersion(env, req, path[2]);
+    case `DELETE classes/${VERSION_CLASS}/:id`:
+      return deleteVersion(env, req, path[2]);
+    case `GET classes/${VERSION_POLICY_CLASS}`:
+      return getVersionPolicy(env, req);
+    case `PUT classes/${VERSION_POLICY_CLASS}/:id`:
+      return setVersionPlan(env, req, path[2]);
+    case 'POST users':
+      return signUp(env, req);
     case 'GET login':
-    case 'POST login': return logIn(env, req);
-    case 'GET users/me': return me(req);
-    case 'GET date': return json({ __type: 'Date', iso: new Date().toISOString() });
+    case 'POST login':
+      return logIn(env, req);
+    case 'GET users/me':
+      return me(req);
+    case 'GET date':
+      return json({ __type: 'Date', iso: new Date().toISOString() });
   }
   throw new LCError(403, 119, 'The operation is not supported.');
 }
@@ -142,13 +165,17 @@ async function signUp(env, { data }) {
   if (await env.DB.prepare('SELECT 1 FROM users WHERE username = ?').bind(username).first()) {
     throw new LCError(400, 202, 'Username has already been taken.');
   }
-  if (email && (await env.DB.prepare('SELECT 1 FROM users WHERE email = ? COLLATE NOCASE').bind(email).first())) {
+  if (
+    email &&
+    (await env.DB.prepare('SELECT 1 FROM users WHERE email = ? COLLATE NOCASE').bind(email).first())
+  ) {
     throw new LCError(400, 203, 'This email address has already been taken.');
   }
 
   const extra = {};
   for (const [key, value] of Object.entries(data)) {
-    if (!['username', 'password', 'email', 'plan'].includes(key) && !RESERVED_FIELDS.has(key)) extra[key] = value;
+    if (!['username', 'password', 'email', 'plan'].includes(key) && !RESERVED_FIELDS.has(key))
+      extra[key] = value;
   }
   const pw = await hashPassword(password);
   const now = new Date().toISOString();
@@ -163,8 +190,18 @@ async function signUp(env, { data }) {
                           sessionToken, extra, createdAt, updatedAt)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
-      .bind(user.objectId, username, email || null, pw.algo, pw.hash, pw.salt, user.sessionToken,
-        JSON.stringify(extra), now, now)
+      .bind(
+        user.objectId,
+        username,
+        email || null,
+        pw.algo,
+        pw.hash,
+        pw.salt,
+        user.sessionToken,
+        JSON.stringify(extra),
+        now,
+        now,
+      )
       .run();
   } catch (err) {
     // Lost a race against a concurrent sign-up.
@@ -192,7 +229,11 @@ async function logIn(env, { data }) {
   const updates = {};
   if (row.password_algo !== 'pbkdf2') {
     const pw = await hashPassword(password);
-    Object.assign(updates, { password_algo: pw.algo, password_hash: pw.hash, password_salt: pw.salt });
+    Object.assign(updates, {
+      password_algo: pw.algo,
+      password_hash: pw.hash,
+      password_salt: pw.salt,
+    });
   }
   if (!row.sessionToken) updates.sessionToken = newSessionToken();
   if (Object.keys(updates).length) {
@@ -242,7 +283,14 @@ async function createDeck(env, { user, data }) {
   if (!user) throw loginRequired();
   if (data.pubUserId != null && data.pubUserId !== user.objectId) throw forbidden();
   const now = new Date().toISOString();
-  const row = { objectId: newObjectId(), pubUserId: user.objectId, blob_fields: '[]', extra: '{}', createdAt: now, updatedAt: now };
+  const row = {
+    objectId: newObjectId(),
+    pubUserId: user.objectId,
+    blob_fields: '[]',
+    extra: '{}',
+    createdAt: now,
+    updatedAt: now,
+  };
   applyDeckChanges(row, data);
   await putBlobs(env, row.objectId, data);
   await env.DB.prepare(
@@ -274,7 +322,9 @@ async function deleteDeck(env, { user }, id) {
   const row = await getDeckRow(env, id);
   if (!row) return json({});
   if (row.pubUserId !== user.objectId) throw forbidden('Forbidden to delete by ACL.');
-  const { results: versions } = await env.DB.prepare('SELECT objectId FROM deck_versions WHERE deckId = ?').bind(id).all();
+  const { results: versions } = await env.DB.prepare('SELECT objectId FROM deck_versions WHERE deckId = ?')
+    .bind(id)
+    .all();
   await env.DB.prepare('DELETE FROM decks WHERE objectId = ?').bind(id).run();
   const blobs = JSON.parse(row.blob_fields).map((f) => blobKey(id, f));
   blobs.push(...versions.map((version) => versionBlobKey(version.objectId)));
@@ -316,7 +366,9 @@ async function queryDecks(env, { user, params }) {
 
   const result = {};
   if (limit > 0) {
-    const { results } = await env.DB.prepare(`SELECT * FROM decks ${whereSql} ORDER BY ${order} LIMIT ? OFFSET ?`)
+    const { results } = await env.DB.prepare(
+      `SELECT * FROM decks ${whereSql} ORDER BY ${order} LIMIT ? OFFSET ?`,
+    )
       .bind(...binds, limit, skip)
       .all();
     const keys = parseKeys(params.keys);
@@ -325,7 +377,9 @@ async function queryDecks(env, { user, params }) {
     result.results = [];
   }
   if (params.count == 1) {
-    const row = await env.DB.prepare(`SELECT COUNT(*) AS n FROM decks ${whereSql}`).bind(...binds).first();
+    const row = await env.DB.prepare(`SELECT COUNT(*) AS n FROM decks ${whereSql}`)
+      .bind(...binds)
+      .first();
     result.count = row.n;
   }
   return json(result);
@@ -348,7 +402,12 @@ function parseOrder(order) {
 
 function parseKeys(keys) {
   if (!keys) return null;
-  return new Set(String(keys).split(',').map((k) => k.trim()).filter(Boolean));
+  return new Set(
+    String(keys)
+      .split(',')
+      .map((k) => k.trim())
+      .filter(Boolean),
+  );
 }
 
 // Applies a LeanCloud-style change set to a deck row (in memory). Blob field
@@ -385,9 +444,17 @@ async function putBlobs(env, id, data) {
     if (value == null || value.__op === 'Delete') {
       deletes.push(blobKey(id, field));
     } else if (typeof value === 'string') {
-      puts.push(env.BUCKET.put(blobKey(id, field), value, { customMetadata: { type: 'string' } }));
+      puts.push(
+        env.BUCKET.put(blobKey(id, field), value, {
+          customMetadata: { type: 'string' },
+        }),
+      );
     } else {
-      puts.push(env.BUCKET.put(blobKey(id, field), JSON.stringify(value), { customMetadata: { type: 'json' } }));
+      puts.push(
+        env.BUCKET.put(blobKey(id, field), JSON.stringify(value), {
+          customMetadata: { type: 'json' },
+        }),
+      );
     }
   }
   if (deletes.length) puts.push(env.BUCKET.delete(deletes));
@@ -396,7 +463,11 @@ async function putBlobs(env, id, data) {
 
 async function deckToJSON(env, row, keys) {
   const want = (k) => !keys || keys.has(k);
-  const out = { objectId: row.objectId, createdAt: row.createdAt, updatedAt: row.updatedAt };
+  const out = {
+    objectId: row.objectId,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
   if (row.pubUserId != null && want('pubUserId')) out.pubUserId = row.pubUserId;
   for (const [key, value] of Object.entries(JSON.parse(row.extra))) {
     if (want(key)) out[key] = value;
@@ -420,24 +491,67 @@ const blobKey = (id, field) => `decks/${id}/${field}`;
 
 const VERSION_FIELDS = new Set(['hash', 'name', 'authorId', 'authorName', 'title', 'slideCount']);
 const versionBlobKey = (id) => `versions/${id}/metadata`;
-const VERSION_REASONS = new Set(['auto', 'created', 'named', 'restore-point']);
-const EVICTION_PRIORITY = { auto: 0, 'restore-point': 1, created: 2, named: 3 };
+const VERSION_REASON_SET = new Set(VERSION_REASONS);
 
 async function getVersionRow(env, id) {
   return env.DB.prepare('SELECT * FROM deck_versions WHERE objectId = ?').bind(id).first();
 }
 
-function getVersionPolicy(env, { user }) {
+function parsedWhere(params) {
+  let where = params.where ?? {};
+  if (typeof where === 'string') {
+    try {
+      where = JSON.parse(where);
+    } catch {
+      throw new LCError(400, 107, 'Malformed where.');
+    }
+  }
+  return where || {};
+}
+
+async function getVersionPolicy(env, { user, params }) {
   if (!user) throw loginRequired();
-  return json({ results: [{ objectId: 'current', ...versionPolicy(env, user) }] });
+  const where = parsedWhere(params);
+  const deckId = where?.deckId?.$eq ?? where?.deckId;
+  if (deckId != null) {
+    const deck = await getDeckRow(env, deckId);
+    if (!deck) throw notFound();
+    if (deck.pubUserId !== user.objectId) throw forbidden();
+  }
+  const policy = versionPolicy(env, user);
+  if (deckId) await enforceVersionPolicy(env, user, deckId, policy);
+  return json({
+    results: [
+      {
+        objectId: 'current',
+        ...policy,
+        usage: await versionUsage(env, user, deckId),
+      },
+    ],
+  });
+}
+
+async function setVersionPlan(env, { user, data }, id) {
+  if (!user) throw loginRequired();
+  if (id !== 'current') throw notFound();
+  if (env.ALLOW_DEV_PLAN_SWITCH !== 'true') throw forbidden('Plan switching is disabled.');
+  if (typeof data.plan !== 'string' || !versionPlanExists(env, data.plan)) {
+    throw new LCError(400, 1, 'Unknown version history plan.');
+  }
+  const now = new Date().toISOString();
+  await env.DB.prepare('UPDATE users SET plan = ?, updatedAt = ? WHERE objectId = ?')
+    .bind(data.plan, now, user.objectId)
+    .run();
+  return json({ updatedAt: now, plan: data.plan });
 }
 
 async function removeVersionRows(env, rows) {
   if (!rows.length) return;
   for (let i = 0; i < rows.length; i += 100) {
     await env.DB.batch(
-      rows.slice(i, i + 100).map((row) =>
-        env.DB.prepare('DELETE FROM deck_versions WHERE objectId = ?').bind(row.objectId)),
+      rows
+        .slice(i, i + 100)
+        .map((row) => env.DB.prepare('DELETE FROM deck_versions WHERE objectId = ?').bind(row.objectId)),
     );
   }
   for (let i = 0; i < rows.length; i += 1000) {
@@ -445,9 +559,12 @@ async function removeVersionRows(env, rows) {
   }
 }
 
-const oldestFirst = (a, b) =>
-  (EVICTION_PRIORITY[a.reason] ?? 0) - (EVICTION_PRIORITY[b.reason] ?? 0) ||
-  a.createdAt.localeCompare(b.createdAt);
+const lruTime = (row) => row.accessedAt || row.createdAt;
+const oldestFirst = (a, b) => {
+  const critical =
+    Number(CRITICAL_VERSION_REASONS.has(a.reason)) - Number(CRITICAL_VERSION_REASONS.has(b.reason));
+  return critical || lruTime(a).localeCompare(lruTime(b));
+};
 
 function trimTo(rows, selected, { count = 0, bytes = 0 } = {}) {
   const kept = rows.filter((row) => !selected.has(row.objectId));
@@ -463,8 +580,11 @@ function trimTo(rows, selected, { count = 0, bytes = 0 } = {}) {
 
 async function enforceVersionPolicy(env, user, deckId, policy) {
   const { results: all } = await env.DB.prepare(
-    'SELECT objectId, deckId, reason, sizeBytes, createdAt FROM deck_versions WHERE pubUserId = ? ORDER BY createdAt ASC',
-  ).bind(user.objectId).all();
+    `SELECT objectId, deckId, reason, sizeBytes, createdAt, accessedAt
+     FROM deck_versions WHERE pubUserId = ? ORDER BY createdAt ASC`,
+  )
+    .bind(user.objectId)
+    .all();
   const selected = new Set();
   const now = Date.now();
 
@@ -476,20 +596,57 @@ async function enforceVersionPolicy(env, user, deckId, policy) {
   const deckRows = all.filter((row) => row.deckId === deckId);
   const reasonCaps = {
     auto: policy.maxAutoVersionsPerDeck,
-    // Sequential named creates are rejected before writing. Keeping this cap
-    // here also resolves two clients racing to create the last named slot.
+    created: 0,
     named: policy.maxNamedVersionsPerDeck,
+    published: policy.maxPublishedVersionsPerDeck,
     'restore-point': policy.maxRestoreVersionsPerDeck,
   };
   for (const [reason, cap] of Object.entries(reasonCaps)) {
-    if (!cap) continue;
-    const rows = deckRows.filter((row) => row.reason === reason && !selected.has(row.objectId));
+    const rows = deckRows
+      .filter((row) => row.reason === reason && !selected.has(row.objectId))
+      .sort((a, b) => lruTime(a).localeCompare(lruTime(b)));
     for (const row of rows.slice(0, Math.max(0, rows.length - cap))) selected.add(row.objectId);
   }
 
-  trimTo(deckRows, selected, { count: policy.maxVersionsPerDeck, bytes: policy.maxBytesPerDeck });
-  trimTo(all, selected, { count: policy.maxVersionsPerUser, bytes: policy.maxBytesPerUser });
-  await removeVersionRows(env, all.filter((row) => selected.has(row.objectId)));
+  const critical = deckRows
+    .filter((row) => CRITICAL_VERSION_REASONS.has(row.reason) && !selected.has(row.objectId))
+    .sort((a, b) => lruTime(a).localeCompare(lruTime(b)));
+  for (const row of critical.slice(0, Math.max(0, critical.length - policy.maxCriticalVersionsPerDeck))) {
+    selected.add(row.objectId);
+  }
+
+  trimTo(deckRows, selected, {
+    count: policy.maxVersionsPerDeck,
+    bytes: policy.maxBytesPerDeck,
+  });
+  trimTo(all, selected, {
+    count: policy.maxVersionsPerUser,
+    bytes: policy.maxBytesPerUser,
+  });
+  await removeVersionRows(
+    env,
+    all.filter((row) => selected.has(row.objectId)),
+  );
+}
+
+async function versionUsage(env, user, deckId) {
+  const { results } = await env.DB.prepare(
+    `SELECT deckId, reason, sizeBytes FROM deck_versions WHERE pubUserId = ?`,
+  )
+    .bind(user.objectId)
+    .all();
+  const summary = (rows) => ({
+    count: rows.length,
+    bytes: rows.reduce((sum, row) => sum + Number(row.sizeBytes || 0), 0),
+    automatic: rows.filter((row) => row.reason === 'auto').length,
+    critical: rows.filter((row) => CRITICAL_VERSION_REASONS.has(row.reason)).length,
+    named: rows.filter((row) => row.reason === 'named').length,
+    published: rows.filter((row) => row.reason === 'published').length,
+  });
+  return {
+    user: summary(results),
+    deck: summary(deckId ? results.filter((row) => row.deckId === deckId) : []),
+  };
 }
 
 async function createVersion(env, { user, data }) {
@@ -503,7 +660,10 @@ async function createVersion(env, { user, data }) {
 
   const policy = versionPolicy(env, user);
   if (!policy.enabled) throw new LCError(403, 403, 'Version history is not available for this plan.');
-  const reason = VERSION_REASONS.has(data.reason) ? data.reason : 'auto';
+  const reason = VERSION_REASON_SET.has(data.reason) ? data.reason : 'auto';
+  if (!reasonEnabled(policy, reason)) {
+    throw new LCError(403, 403, `${reason} versions are not available for this plan.`);
+  }
   const sizeBytes = versionSize(data.metadata);
   if (policy.maxSnapshotBytes && sizeBytes > policy.maxSnapshotBytes) {
     throw new LCError(413, 1, 'This version is larger than the plan allows.');
@@ -511,20 +671,13 @@ async function createVersion(env, { user, data }) {
   if (reason === 'auto' && policy.autoIntervalMs) {
     const latest = await env.DB.prepare(
       'SELECT createdAt FROM deck_versions WHERE pubUserId = ? AND deckId = ? ORDER BY createdAt DESC LIMIT 1',
-    ).bind(user.objectId, data.deckId).first();
+    )
+      .bind(user.objectId, data.deckId)
+      .first();
     if (latest && Date.now() - Date.parse(latest.createdAt) < policy.autoIntervalMs) {
       throw new LCError(429, 1, 'The automatic version interval has not elapsed.');
     }
   }
-  if (reason === 'named' && policy.maxNamedVersionsPerDeck) {
-    const named = await env.DB.prepare(
-      "SELECT COUNT(*) AS n FROM deck_versions WHERE pubUserId = ? AND deckId = ? AND reason = 'named'",
-    ).bind(user.objectId, data.deckId).first();
-    if (Number(named?.n || 0) >= policy.maxNamedVersionsPerDeck) {
-      throw new LCError(409, 1, 'The named version limit for this plan has been reached.');
-    }
-  }
-
   const now = new Date().toISOString();
   const row = {
     objectId: newObjectId(),
@@ -536,14 +689,26 @@ async function createVersion(env, { user, data }) {
     createdAt: now,
     updatedAt: now,
   };
-  await env.BUCKET.put(versionBlobKey(row.objectId), data.metadata, { customMetadata: { type: 'string' } });
+  await env.BUCKET.put(versionBlobKey(row.objectId), data.metadata, {
+    customMetadata: { type: 'string' },
+  });
   try {
     await env.DB.prepare(
       `INSERT INTO deck_versions
-       (objectId, deckId, pubUserId, reason, sizeBytes, extra, createdAt, updatedAt)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+       (objectId, deckId, pubUserId, reason, sizeBytes, extra, createdAt, updatedAt, accessedAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
-      .bind(row.objectId, row.deckId, row.pubUserId, reason, sizeBytes, row.extra, row.createdAt, row.updatedAt)
+      .bind(
+        row.objectId,
+        row.deckId,
+        row.pubUserId,
+        reason,
+        sizeBytes,
+        row.extra,
+        row.createdAt,
+        row.updatedAt,
+        now,
+      )
       .run();
   } catch (error) {
     await env.BUCKET.delete(versionBlobKey(row.objectId));
@@ -558,7 +723,9 @@ async function getVersion(env, { user, params }, id) {
   const row = await getVersionRow(env, id);
   if (!row) throw notFound();
   if (row.pubUserId !== user.objectId) throw forbidden('Version history belongs to its owner.');
-  return json(await versionToJSON(env, row, parseKeys(params.keys)));
+  const keys = parseKeys(params.keys);
+  if (!keys || keys.has('metadata')) await touchVersion(env, row);
+  return json(await versionToJSON(env, row, keys));
 }
 
 async function deleteVersion(env, { user }, id) {
@@ -573,14 +740,7 @@ async function deleteVersion(env, { user }, id) {
 
 async function queryVersions(env, { user, params }) {
   if (!user) throw loginRequired();
-  let where = params.where ?? {};
-  if (typeof where === 'string') {
-    try {
-      where = JSON.parse(where);
-    } catch {
-      throw new LCError(400, 107, 'Malformed where.');
-    }
-  }
+  const where = parsedWhere(params);
   const owner = where?.pubUserId?.$eq ?? where?.pubUserId;
   const deckId = where?.deckId?.$eq ?? where?.deckId;
   const objectId = where?.objectId?.$eq ?? where?.objectId;
@@ -603,16 +763,33 @@ async function queryVersions(env, { user, params }) {
     .bind(...binds)
     .all();
   const keys = parseKeys(params.keys);
-  return json({ results: await Promise.all(results.map((row) => versionToJSON(env, row, keys))) });
+  if (objectId && (!keys || keys.has('metadata')))
+    await Promise.all(results.map((row) => touchVersion(env, row)));
+  return json({
+    results: await Promise.all(results.map((row) => versionToJSON(env, row, keys))),
+  });
+}
+
+async function touchVersion(env, row) {
+  const now = new Date().toISOString();
+  await env.DB.prepare('UPDATE deck_versions SET accessedAt = ? WHERE objectId = ?')
+    .bind(now, row.objectId)
+    .run();
+  row.accessedAt = now;
 }
 
 async function versionToJSON(env, row, keys) {
   const want = (key) => !keys || keys.has(key);
-  const out = { objectId: row.objectId, createdAt: row.createdAt, updatedAt: row.updatedAt };
+  const out = {
+    objectId: row.objectId,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
   if (want('pubUserId')) out.pubUserId = row.pubUserId;
   if (want('deckId')) out.deckId = row.deckId;
   if (want('reason')) out.reason = row.reason;
   if (want('sizeBytes')) out.sizeBytes = row.sizeBytes;
+  if (want('accessedAt')) out.accessedAt = row.accessedAt;
   for (const [key, value] of Object.entries(JSON.parse(row.extra))) if (want(key)) out[key] = value;
   if (want('metadata')) {
     const object = await env.BUCKET.get(versionBlobKey(row.objectId));
@@ -650,8 +827,21 @@ async function handleAdmin(request, env, url) {
 // already-logged-in browsers stay logged in) and the password hash + salt.
 async function importUsers(env, records) {
   const stmts = records.map((u) => {
-    if (!u.objectId || !u.username) throw new LCError(400, 1, `Bad user record: ${JSON.stringify(u).slice(0, 200)}`);
-    const known = ['objectId', 'username', 'email', 'emailVerified', 'password', 'salt', 'sessionToken', 'createdAt', 'updatedAt', 'ACL', 'authData'];
+    if (!u.objectId || !u.username)
+      throw new LCError(400, 1, `Bad user record: ${JSON.stringify(u).slice(0, 200)}`);
+    const known = [
+      'objectId',
+      'username',
+      'email',
+      'emailVerified',
+      'password',
+      'salt',
+      'sessionToken',
+      'createdAt',
+      'updatedAt',
+      'ACL',
+      'authData',
+    ];
     const extra = Object.fromEntries(Object.entries(u).filter(([k]) => !known.includes(k)));
     const hasPw = typeof u.password === 'string' && u.password !== '';
     return env.DB.prepare(
@@ -689,7 +879,14 @@ async function importDecks(env, records) {
     stmts.push(
       env.DB.prepare(
         'INSERT OR REPLACE INTO decks (objectId, pubUserId, blob_fields, extra, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?)',
-      ).bind(d.objectId, d.pubUserId ?? null, row.blob_fields, row.extra, isoDate(d.createdAt), isoDate(d.updatedAt ?? d.createdAt)),
+      ).bind(
+        d.objectId,
+        d.pubUserId ?? null,
+        row.blob_fields,
+        row.extra,
+        isoDate(d.createdAt),
+        isoDate(d.updatedAt ?? d.createdAt),
+      ),
     );
   }
   if (stmts.length) await env.DB.batch(stmts);
@@ -710,7 +907,11 @@ const CORS_HEADERS = {
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...CORS_HEADERS },
+    headers: {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-store',
+      ...CORS_HEADERS,
+    },
   });
 }
 
@@ -728,8 +929,12 @@ function isEmail(s) {
 
 // Same shape as LeanCloud/MongoDB ObjectIds: 4-byte timestamp + 8 random bytes, hex.
 function newObjectId() {
-  const ts = Math.floor(Date.now() / 1000).toString(16).padStart(8, '0');
-  const rand = [...crypto.getRandomValues(new Uint8Array(8))].map((b) => b.toString(16).padStart(2, '0')).join('');
+  const ts = Math.floor(Date.now() / 1000)
+    .toString(16)
+    .padStart(8, '0');
+  const rand = [...crypto.getRandomValues(new Uint8Array(8))]
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
   return ts + rand;
 }
 
@@ -740,6 +945,9 @@ function newSessionToken() {
 
 async function sameSecret(a, b) {
   const enc = new TextEncoder();
-  const [ha, hb] = await Promise.all([crypto.subtle.digest('SHA-256', enc.encode(a)), crypto.subtle.digest('SHA-256', enc.encode(b))]);
+  const [ha, hb] = await Promise.all([
+    crypto.subtle.digest('SHA-256', enc.encode(a)),
+    crypto.subtle.digest('SHA-256', enc.encode(b)),
+  ]);
   return crypto.subtle.timingSafeEqual(ha, hb);
 }
