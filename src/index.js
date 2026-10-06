@@ -13,9 +13,11 @@
 // decks and their owner-only version history.
 
 import { hashPassword, verifyPassword } from './password.js';
+import { versionPolicy, versionSize } from './versionPolicy.js';
 
 const DECK_CLASS = 'YSDeck';
 const VERSION_CLASS = 'YSDeckVersion';
+const VERSION_POLICY_CLASS = 'YSDeckVersionPolicy';
 // Deck fields kept in R2 rather than D1 (they embed base64 images/videos).
 const BLOB_FIELDS = new Set(['metadata', 'metaHTML']);
 const RESERVED_FIELDS = new Set(['objectId', 'createdAt', 'updatedAt', 'ACL']);
@@ -74,6 +76,7 @@ async function handleApi(request, env, url) {
     case `POST classes/${VERSION_CLASS}`: return createVersion(env, req);
     case `GET classes/${VERSION_CLASS}/:id`: return getVersion(env, req, path[2]);
     case `DELETE classes/${VERSION_CLASS}/:id`: return deleteVersion(env, req, path[2]);
+    case `GET classes/${VERSION_POLICY_CLASS}`: return getVersionPolicy(env, req);
     case 'POST users': return signUp(env, req);
     case 'GET login':
     case 'POST login': return logIn(env, req);
@@ -145,7 +148,7 @@ async function signUp(env, { data }) {
 
   const extra = {};
   for (const [key, value] of Object.entries(data)) {
-    if (!['username', 'password', 'email'].includes(key) && !RESERVED_FIELDS.has(key)) extra[key] = value;
+    if (!['username', 'password', 'email', 'plan'].includes(key) && !RESERVED_FIELDS.has(key)) extra[key] = value;
   }
   const pw = await hashPassword(password);
   const now = new Date().toISOString();
@@ -214,6 +217,7 @@ function userToJSON(row) {
     username: row.username,
     ...(row.email ? { email: row.email } : {}),
     emailVerified: !!row.emailVerified,
+    plan: row.plan || 'free',
     sessionToken: row.sessionToken,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -414,11 +418,78 @@ const blobKey = (id, field) => `decks/${id}/${field}`;
 
 // --- private deck versions -------------------------------------------------
 
-const VERSION_FIELDS = new Set(['hash', 'name', 'reason', 'authorId', 'authorName', 'title', 'slideCount']);
+const VERSION_FIELDS = new Set(['hash', 'name', 'authorId', 'authorName', 'title', 'slideCount']);
 const versionBlobKey = (id) => `versions/${id}/metadata`;
+const VERSION_REASONS = new Set(['auto', 'created', 'named', 'restore-point']);
+const EVICTION_PRIORITY = { auto: 0, 'restore-point': 1, created: 2, named: 3 };
 
 async function getVersionRow(env, id) {
   return env.DB.prepare('SELECT * FROM deck_versions WHERE objectId = ?').bind(id).first();
+}
+
+function getVersionPolicy(env, { user }) {
+  if (!user) throw loginRequired();
+  return json({ results: [{ objectId: 'current', ...versionPolicy(env, user) }] });
+}
+
+async function removeVersionRows(env, rows) {
+  if (!rows.length) return;
+  for (let i = 0; i < rows.length; i += 100) {
+    await env.DB.batch(
+      rows.slice(i, i + 100).map((row) =>
+        env.DB.prepare('DELETE FROM deck_versions WHERE objectId = ?').bind(row.objectId)),
+    );
+  }
+  for (let i = 0; i < rows.length; i += 1000) {
+    await env.BUCKET.delete(rows.slice(i, i + 1000).map((row) => versionBlobKey(row.objectId)));
+  }
+}
+
+const oldestFirst = (a, b) =>
+  (EVICTION_PRIORITY[a.reason] ?? 0) - (EVICTION_PRIORITY[b.reason] ?? 0) ||
+  a.createdAt.localeCompare(b.createdAt);
+
+function trimTo(rows, selected, { count = 0, bytes = 0 } = {}) {
+  const kept = rows.filter((row) => !selected.has(row.objectId));
+  let keptCount = kept.length;
+  let keptBytes = kept.reduce((sum, row) => sum + Number(row.sizeBytes || 0), 0);
+  for (const row of [...kept].sort(oldestFirst)) {
+    if ((!count || keptCount <= count) && (!bytes || keptBytes <= bytes)) break;
+    selected.add(row.objectId);
+    keptCount -= 1;
+    keptBytes -= Number(row.sizeBytes || 0);
+  }
+}
+
+async function enforceVersionPolicy(env, user, deckId, policy) {
+  const { results: all } = await env.DB.prepare(
+    'SELECT objectId, deckId, reason, sizeBytes, createdAt FROM deck_versions WHERE pubUserId = ? ORDER BY createdAt ASC',
+  ).bind(user.objectId).all();
+  const selected = new Set();
+  const now = Date.now();
+
+  for (const row of all) {
+    const days = Number(policy.retentionDays?.[row.reason] || 0);
+    if (days && now - Date.parse(row.createdAt) > days * 86400000) selected.add(row.objectId);
+  }
+
+  const deckRows = all.filter((row) => row.deckId === deckId);
+  const reasonCaps = {
+    auto: policy.maxAutoVersionsPerDeck,
+    // Sequential named creates are rejected before writing. Keeping this cap
+    // here also resolves two clients racing to create the last named slot.
+    named: policy.maxNamedVersionsPerDeck,
+    'restore-point': policy.maxRestoreVersionsPerDeck,
+  };
+  for (const [reason, cap] of Object.entries(reasonCaps)) {
+    if (!cap) continue;
+    const rows = deckRows.filter((row) => row.reason === reason && !selected.has(row.objectId));
+    for (const row of rows.slice(0, Math.max(0, rows.length - cap))) selected.add(row.objectId);
+  }
+
+  trimTo(deckRows, selected, { count: policy.maxVersionsPerDeck, bytes: policy.maxBytesPerDeck });
+  trimTo(all, selected, { count: policy.maxVersionsPerUser, bytes: policy.maxBytesPerUser });
+  await removeVersionRows(env, all.filter((row) => selected.has(row.objectId)));
 }
 
 async function createVersion(env, { user, data }) {
@@ -429,6 +500,30 @@ async function createVersion(env, { user, data }) {
   const deck = await getDeckRow(env, data.deckId);
   if (!deck) throw notFound();
   if (deck.pubUserId !== user.objectId) throw forbidden('Versions belong to the deck owner.');
+
+  const policy = versionPolicy(env, user);
+  if (!policy.enabled) throw new LCError(403, 403, 'Version history is not available for this plan.');
+  const reason = VERSION_REASONS.has(data.reason) ? data.reason : 'auto';
+  const sizeBytes = versionSize(data.metadata);
+  if (policy.maxSnapshotBytes && sizeBytes > policy.maxSnapshotBytes) {
+    throw new LCError(413, 1, 'This version is larger than the plan allows.');
+  }
+  if (reason === 'auto' && policy.autoIntervalMs) {
+    const latest = await env.DB.prepare(
+      'SELECT createdAt FROM deck_versions WHERE pubUserId = ? AND deckId = ? ORDER BY createdAt DESC LIMIT 1',
+    ).bind(user.objectId, data.deckId).first();
+    if (latest && Date.now() - Date.parse(latest.createdAt) < policy.autoIntervalMs) {
+      throw new LCError(429, 1, 'The automatic version interval has not elapsed.');
+    }
+  }
+  if (reason === 'named' && policy.maxNamedVersionsPerDeck) {
+    const named = await env.DB.prepare(
+      "SELECT COUNT(*) AS n FROM deck_versions WHERE pubUserId = ? AND deckId = ? AND reason = 'named'",
+    ).bind(user.objectId, data.deckId).first();
+    if (Number(named?.n || 0) >= policy.maxNamedVersionsPerDeck) {
+      throw new LCError(409, 1, 'The named version limit for this plan has been reached.');
+    }
+  }
 
   const now = new Date().toISOString();
   const row = {
@@ -444,14 +539,17 @@ async function createVersion(env, { user, data }) {
   await env.BUCKET.put(versionBlobKey(row.objectId), data.metadata, { customMetadata: { type: 'string' } });
   try {
     await env.DB.prepare(
-      'INSERT INTO deck_versions (objectId, deckId, pubUserId, extra, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?)',
+      `INSERT INTO deck_versions
+       (objectId, deckId, pubUserId, reason, sizeBytes, extra, createdAt, updatedAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     )
-      .bind(row.objectId, row.deckId, row.pubUserId, row.extra, row.createdAt, row.updatedAt)
+      .bind(row.objectId, row.deckId, row.pubUserId, reason, sizeBytes, row.extra, row.createdAt, row.updatedAt)
       .run();
   } catch (error) {
     await env.BUCKET.delete(versionBlobKey(row.objectId));
     throw error;
   }
+  await enforceVersionPolicy(env, user, row.deckId, policy);
   return json({ objectId: row.objectId, createdAt: now, updatedAt: now }, 201);
 }
 
@@ -513,6 +611,8 @@ async function versionToJSON(env, row, keys) {
   const out = { objectId: row.objectId, createdAt: row.createdAt, updatedAt: row.updatedAt };
   if (want('pubUserId')) out.pubUserId = row.pubUserId;
   if (want('deckId')) out.deckId = row.deckId;
+  if (want('reason')) out.reason = row.reason;
+  if (want('sizeBytes')) out.sizeBytes = row.sizeBytes;
   for (const [key, value] of Object.entries(JSON.parse(row.extra))) if (want(key)) out[key] = value;
   if (want('metadata')) {
     const object = await env.BUCKET.get(versionBlobKey(row.objectId));

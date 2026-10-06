@@ -10,11 +10,28 @@ import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createServer } from 'node:net';
 import { after, before, test } from 'node:test';
 
-const PORT = 8790 + Math.floor(Math.random() * 100);
+const PORT = await new Promise((resolve, reject) => {
+  const probe = createServer();
+  probe.once('error', reject);
+  probe.listen(0, '127.0.0.1', () => {
+    const { port } = probe.address();
+    probe.close((error) => error ? reject(error) : resolve(port));
+  });
+});
 const BASE = `http://127.0.0.1:${PORT}`;
 const ADMIN_TOKEN = 'test-admin-token';
+const VERSION_HISTORY_POLICIES = JSON.stringify({
+  free: {
+    autoIntervalMs: 0,
+    maxVersionsPerDeck: 4,
+    maxAutoVersionsPerDeck: 2,
+    maxNamedVersionsPerDeck: 2,
+    maxRestoreVersionsPerDeck: 1,
+  },
+});
 const dir = mkdtempSync(join(tmpdir(), 'yanshuo-test-'));
 let server;
 
@@ -67,12 +84,29 @@ async function sdk(path, method, data = {}, sessionToken) {
   return { status: res.status, body: await res.json() };
 }
 
+async function sdkAfterLocalD1(path, method, data = {}, sessionToken) {
+  let lastError;
+  for (let attempt = 0; attempt < 30; attempt++) {
+    try {
+      return await sdk(path, method, data, sessionToken);
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+  }
+  throw lastError;
+}
+
 before(async () => {
   const persist = join(dir, 'state');
   execFileSync('npx', ['wrangler', 'd1', 'migrations', 'apply', 'yanshuo', '--local', '--persist-to', persist], { stdio: 'ignore' });
   writeFileSync(join(dir, 'users.json'), JSON.stringify({ results: [legacyUser] }));
   writeFileSync(join(dir, 'decks.jsonl'), legacyDecks.map((d) => JSON.stringify(d)).join('\n'));
-  server = spawn('npx', ['wrangler', 'dev', '--port', String(PORT), '--ip', '127.0.0.1', '--persist-to', persist, '--var', `ADMIN_TOKEN:${ADMIN_TOKEN}`], { stdio: 'ignore', detached: true });
+  server = spawn('npx', [
+    'wrangler', 'dev', '--port', String(PORT), '--ip', '127.0.0.1', '--persist-to', persist,
+    '--var', `ADMIN_TOKEN:${ADMIN_TOKEN}`,
+    '--var', `VERSION_HISTORY_POLICIES:${VERSION_HISTORY_POLICIES}`,
+  ], { stdio: 'ignore', detached: true });
   for (let i = 0; i < 120; i++) {
     try {
       if ((await fetch(BASE)).ok) return;
@@ -123,7 +157,8 @@ test('imported users log in with their LeanCloud password; hash gets upgraded', 
     '--command', `SELECT password_algo FROM users WHERE objectId = '${legacyUser.objectId}'`], { encoding: 'utf8' }));
   assert.equal(row[0].results[0].password_algo, 'pbkdf2');
 
-  const again = await sdk('login', 'GET', { username: legacyUser.username, password: 'old-password' });
+  // A separate local D1 command briefly restarts the dev Worker.
+  const again = await sdkAfterLocalD1('login', 'GET', { username: legacyUser.username, password: 'old-password' });
   assert.equal(again.status, 200);
 });
 
@@ -219,6 +254,53 @@ test('version history is private, ordered, projected, and restorable by id', asy
   assert.equal(fetched.body.metadata, firstMetadata);
   assert.equal((await sdk(`classes/YSDeckVersion/${first.body.objectId}`, 'DELETE', {}, token)).status, 200);
   assert.equal((await sdk(`classes/YSDeckVersion/${first.body.objectId}`, 'GET', {}, token)).status, 404);
+});
+
+test('version history policy is server-owned and prunes each reason and the total allowance', async () => {
+  const token = legacyUser.sessionToken;
+  const policy = await sdk('classes/YSDeckVersionPolicy', 'GET', {}, token);
+  assert.equal(policy.status, 200);
+  assert.equal(policy.body.results[0].plan, 'free');
+  assert.equal(policy.body.results[0].maxVersionsPerDeck, 4);
+
+  const attemptedUpgrade = await sdk(
+    'users',
+    'POST',
+    { username: 'quota-hacker', password: 'x', plan: 'pro' },
+  );
+  const attemptedPolicy = await sdk('classes/YSDeckVersionPolicy', 'GET', {}, attemptedUpgrade.body.sessionToken);
+  assert.equal(attemptedPolicy.body.results[0].plan, 'free');
+
+  const createdDeck = await sdk(
+    'classes/YSDeck',
+    'POST',
+    { pubUserId: legacyUser.objectId, metadata: '{"title":"policy"}' },
+    token,
+  );
+  const deckId = createdDeck.body.objectId;
+  for (const [index, reason] of ['created', 'auto', 'auto', 'auto', 'named', 'named'].entries()) {
+    const saved = await sdk(
+      'classes/YSDeckVersion',
+      'POST',
+      { deckId, metadata: JSON.stringify({ index }), hash: String(index), reason, name: reason === 'named' ? `n${index}` : '' },
+      token,
+    );
+    assert.equal(saved.status, 201);
+    await new Promise((resolve) => setTimeout(resolve, 2));
+  }
+  const where = { pubUserId: legacyUser.objectId, deckId };
+  const listed = await sdk('classes/YSDeckVersion', 'GET', { where, order: '-createdAt' }, token);
+  assert.equal(listed.body.results.length, 4);
+  assert.equal(listed.body.results.filter((version) => version.reason === 'auto').length, 1);
+  assert.equal(listed.body.results.filter((version) => version.reason === 'named').length, 2);
+  assert.equal(listed.body.results.filter((version) => version.reason === 'created').length, 1);
+  const tooManyNamed = await sdk(
+    'classes/YSDeckVersion',
+    'POST',
+    { deckId, metadata: '{"named":3}', reason: 'named', name: 'n3' },
+    token,
+  );
+  assert.equal(tooManyNamed.status, 409);
 });
 
 test('owner can save a large deck, publish, and delete', async () => {

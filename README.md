@@ -140,6 +140,13 @@ npm test             # 迁移端到端测试：导入 → 老密码登录 → �
 | `POST /1.1/classes/YSDeckVersion` | 为自己的演说创建私有版本快照 |
 | `GET /1.1/classes/YSDeckVersion` | 按自己的 `pubUserId` 与 `deckId` 查询版本，可加 `objectId`；支持 `order`、`limit`、`skip`、`keys` |
 | `GET/DELETE /1.1/classes/YSDeckVersion/:id` | 读取或删除私有版本（仅演说作者本人） |
+| `GET /1.1/classes/YSDeckVersionPolicy` | 读取当前用户套餐对应的版本历史额度 |
+
+版本历史额度由 Worker 强制执行。用户表的 `plan` 是服务端管理的 entitlement（默认
+`free`），不能在注册时自行设置。可通过 Worker 变量 `VERSION_HISTORY_DEFAULT_PLAN`
+选择默认套餐，并用 `VERSION_HISTORY_POLICIES` JSON 覆盖任意套餐的参数：自动版本间隔、
+列表数量、每份演说/每个用户的版本数、各版本类型的数量、各类型保留天数、单快照大小，
+以及每份演说/每个用户的总字节数。未覆盖的参数采用 `src/versionPolicy.js` 的默认值。
 
 SDK 0.6.x 的请求格式是 `POST` + `text/plain` JSON，方法、会话等信息放在 `_method`、`_SessionToken` 字段里；
 标准 REST 请求（真实 HTTP 方法 + `X-LC-Session` 头）也同样支持。其他路由统一返回 `119`。
