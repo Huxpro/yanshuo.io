@@ -11,3 +11,8 @@ CREATE TABLE staged_media (
 );
 
 CREATE INDEX staged_media_by_owner ON staged_media (ownerId, createdAt);
+
+-- A browser may close after the Worker creates a deck but before it sees the
+-- response. Keep one stable key for that guest project across retries.
+ALTER TABLE decks ADD COLUMN guest_sync_id TEXT;
+CREATE UNIQUE INDEX decks_guest_sync_id ON decks (guest_sync_id) WHERE guest_sync_id IS NOT NULL;

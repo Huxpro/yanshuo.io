@@ -105,7 +105,8 @@ test('guest media is staged before deck creation and adopted only by its owner',
   const item = await stage.json();
   assert.equal((await fetch(item.url)).status, 404, 'staged media is not public before adoption');
   const metadata = JSON.stringify({ slides: [{ blocks: [{ type: 'IMG', src: item.url }] }] });
-  const payload = { metadata, stagedMediaIds: [item.objectId] };
+  const guestSyncId = crypto.randomUUID();
+  const payload = { metadata, stagedMediaIds: [item.objectId], guestSyncId };
   assert.equal((await api('classes/YSDeck', 'POST', payload, other.sessionToken)).status, 409);
   assert.equal((await api('classes/YSDeck', 'POST', { metadata: '{}', stagedMediaIds: [item.objectId] }, owner.sessionToken)).status, 400);
   const created = await api('classes/YSDeck', 'POST', payload, owner.sessionToken);
@@ -117,10 +118,30 @@ test('guest media is staged before deck creation and adopted only by its owner',
   assert.deepEqual(new Uint8Array(await (await fetch(item.url)).arrayBuffer()), bytes);
   const saved = await api(`classes/YSDeck/${created.body.objectId}`, 'GET', null, owner.sessionToken);
   assert.equal(saved.body.metadata, metadata);
+  assert.equal(saved.body.guestSyncId, guestSyncId);
   assert.equal(saved.body.stagedMediaIds, undefined);
-  assert.equal((await api('classes/YSDeck', 'POST', payload, owner.sessionToken)).status, 409);
+  const duplicate = await api('classes/YSDeck', 'POST', payload, owner.sessionToken);
+  assert.equal(duplicate.status, 409, 'retrying an ambiguous create cannot duplicate the deck');
+  assert.equal(duplicate.body.code, 409);
+  const where = encodeURIComponent(JSON.stringify({ pubUserId: owner.objectId, guestSyncId }));
+  const found = await api(`classes/YSDeck?where=${where}`, 'GET', null, owner.sessionToken);
+  assert.deepEqual(found.body.results.map((deck) => deck.objectId), [created.body.objectId]);
+  assert.equal((await api(`classes/YSDeck?where=${where}`, 'GET', null, other.sessionToken)).status, 403);
   assert.equal((await api(`classes/YSDeck/${created.body.objectId}`, 'DELETE', null, owner.sessionToken)).status, 200);
   assert.equal((await fetch(item.url)).status, 404);
+});
+
+test('concurrent retries of one guest sync create at most one deck', async () => {
+  const guestSyncId = crypto.randomUUID();
+  const payload = { metadata: '{}', guestSyncId };
+  const results = await Promise.all([
+    api('classes/YSDeck', 'POST', payload, owner.sessionToken),
+    api('classes/YSDeck', 'POST', payload, owner.sessionToken),
+  ]);
+  assert.deepEqual(results.map((result) => result.status).sort(), [201, 409]);
+  const where = encodeURIComponent(JSON.stringify({ pubUserId: owner.objectId, guestSyncId }));
+  const found = await api(`classes/YSDeck?where=${where}`, 'GET', null, owner.sessionToken);
+  assert.equal(found.body.results.length, 1);
 });
 
 test('a failed guest sync can discard its staged media without touching another owner', async () => {

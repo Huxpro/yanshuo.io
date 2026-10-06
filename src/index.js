@@ -246,6 +246,13 @@ async function getDeck(env, { params }, id) {
 async function createDeck(env, { user, data }) {
   if (!user) throw loginRequired();
   if (data.pubUserId != null && data.pubUserId !== user.objectId) throw forbidden();
+  const syncId = data.guestSyncId ?? null;
+  if (syncId != null && (typeof syncId !== 'string' ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(syncId))) {
+    throw new LCError(400, 107, 'Invalid guest sync id.');
+  }
+  if (syncId && await env.DB.prepare('SELECT objectId FROM decks WHERE guest_sync_id = ?')
+    .bind(syncId).first()) throw new LCError(409, 409, 'Guest deck already exists.');
   const stagedIds = data.stagedMediaIds || [];
   if (!Array.isArray(stagedIds) || stagedIds.length > 64 ||
       new Set(stagedIds).size !== stagedIds.length ||
@@ -277,8 +284,8 @@ async function createDeck(env, { user, data }) {
   const row = { objectId: newObjectId(), pubUserId: user.objectId, blob_fields: '[]', extra: '{}', createdAt: now, updatedAt: now };
   applyDeckChanges(row, fields);
   const statements = [env.DB.prepare(
-    'INSERT INTO decks (objectId, pubUserId, blob_fields, extra, media_bytes, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?)',
-  ).bind(row.objectId, row.pubUserId, row.blob_fields, row.extra, mediaBytes, row.createdAt, row.updatedAt)];
+    'INSERT INTO decks (objectId, pubUserId, blob_fields, extra, media_bytes, guest_sync_id, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+  ).bind(row.objectId, row.pubUserId, row.blob_fields, row.extra, mediaBytes, syncId, row.createdAt, row.updatedAt)];
   for (const item of staged) {
     statements.push(env.DB.prepare(
       "INSERT INTO media (objectId, deckId, ownerId, key, mime, bytes, status, createdAt) VALUES (?, ?, ?, ?, ?, ?, 'ready', ?)",
@@ -296,6 +303,8 @@ async function createDeck(env, { user, data }) {
     } catch (cleanupError) {
       console.warn('Failed to remove orphaned deck blobs:', cleanupError);
     }
+    if (syncId && await env.DB.prepare('SELECT objectId FROM decks WHERE guest_sync_id = ?')
+      .bind(syncId).first()) throw new LCError(409, 409, 'Guest deck already exists.');
     throw error;
   }
   return json({ objectId: row.objectId, createdAt: now, updatedAt: now }, 201);
@@ -307,6 +316,7 @@ async function updateDeck(env, { user, data }, id) {
   if (!row) throw notFound();
   if (row.pubUserId !== user.objectId) throw forbidden('Forbidden to update by ACL.');
   if ('pubUserId' in data && data.pubUserId !== user.objectId) throw forbidden();
+  if ('guestSyncId' in data && data.guestSyncId !== JSON.parse(row.extra).guestSyncId) throw forbidden();
 
   applyDeckChanges(row, data);
   row.updatedAt = new Date().toISOString();
@@ -610,7 +620,7 @@ async function serveMedia(request, env, id) {
 }
 
 // Supports what the app and SDK send: equality on `objectId` (AV.Query#get)
-// or on `pubUserId` (the dashboard's "my decks" list), plus order / limit /
+// or on `pubUserId` / `guestSyncId`, plus order / limit /
 // skip / keys / count. Listing is restricted to the caller's own decks.
 async function queryDecks(env, { user, params }) {
   let where = params.where ?? {};
@@ -625,10 +635,10 @@ async function queryDecks(env, { user, params }) {
   const binds = [];
   for (const [key, value] of Object.entries(where || {})) {
     const v = value && typeof value === 'object' && '$eq' in value ? value.$eq : value;
-    if (!['objectId', 'pubUserId'].includes(key) || typeof v !== 'string') {
+    if (!['objectId', 'pubUserId', 'guestSyncId'].includes(key) || typeof v !== 'string') {
       throw new LCError(400, 1, `Unsupported query on "${key}".`);
     }
-    conds.push(`${key} = ?`);
+    conds.push(`${key === 'guestSyncId' ? 'guest_sync_id' : key} = ?`);
     binds.push(v);
   }
   if (!('objectId' in (where || {}))) {
