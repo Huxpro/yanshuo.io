@@ -17,5 +17,6 @@
     "migrations_dir": "migrations"
   }],
   "r2_buckets": [{"binding": "BUCKET", "bucket_name": "yanshuo-staging-decks"}],
-  "observability": {"enabled": true}
+  "observability": {"enabled": true},
+  "triggers": {"crons": ["0 * * * *"]}
 }
