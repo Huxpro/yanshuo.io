@@ -151,6 +151,76 @@ test('listing someone else\'s decks is refused', async () => {
   assert.equal(put.status, 403);
 });
 
+test('version history is private, ordered, projected, and restorable by id', async () => {
+  const token = legacyUser.sessionToken;
+  const firstMetadata = JSON.stringify({ title: '第一稿', slides: [{ id: 1 }] });
+  const first = await sdk(
+    'classes/YSDeckVersion',
+    'POST',
+    {
+      pubUserId: legacyUser.objectId,
+      deckId: legacyDecks[0].objectId,
+      metadata: firstMetadata,
+      hash: 'first',
+      name: '客户确认稿',
+      reason: 'named',
+      authorName: legacyUser.username,
+      title: '第一稿',
+      slideCount: 1,
+    },
+    token,
+  );
+  assert.equal(first.status, 201);
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const second = await sdk(
+    'classes/YSDeckVersion',
+    'POST',
+    {
+      deckId: legacyDecks[0].objectId,
+      metadata: JSON.stringify({ title: '第二稿', slides: [] }),
+      hash: 'second',
+      reason: 'auto',
+    },
+    token,
+  );
+  assert.equal(second.status, 201);
+
+  const where = { pubUserId: legacyUser.objectId, deckId: legacyDecks[0].objectId };
+  assert.equal((await sdk('classes/YSDeckVersion', 'GET', { where })).status, 401);
+  const mallory = await sdk('login', 'GET', { username: 'mallory', password: 'x' });
+  assert.equal((await sdk('classes/YSDeckVersion', 'GET', { where }, mallory.body.sessionToken)).status, 403);
+
+  const listed = await sdk(
+    'classes/YSDeckVersion',
+    'GET',
+    { where, order: '-createdAt', keys: 'deckId,hash,name,reason,authorName,title,slideCount' },
+    token,
+  );
+  assert.equal(listed.status, 200);
+  assert.deepEqual(listed.body.results.map((version) => version.hash), ['second', 'first']);
+  assert.equal(listed.body.results[1].metadata, undefined, 'list projections do not download snapshot bodies');
+  assert.equal(listed.body.results[1].title, '第一稿');
+
+  const selected = await sdk(
+    'classes/YSDeckVersion',
+    'GET',
+    { where: { ...where, objectId: first.body.objectId }, limit: 1 },
+    token,
+  );
+  assert.equal(selected.body.results.length, 1);
+  assert.equal(selected.body.results[0].metadata, firstMetadata);
+
+  assert.equal((await sdk(`classes/YSDeckVersion/${first.body.objectId}`, 'GET')).status, 401);
+  assert.equal(
+    (await sdk(`classes/YSDeckVersion/${first.body.objectId}`, 'GET', {}, mallory.body.sessionToken)).status,
+    403,
+  );
+  const fetched = await sdk(`classes/YSDeckVersion/${first.body.objectId}`, 'GET', {}, token);
+  assert.equal(fetched.body.metadata, firstMetadata);
+  assert.equal((await sdk(`classes/YSDeckVersion/${first.body.objectId}`, 'DELETE', {}, token)).status, 200);
+  assert.equal((await sdk(`classes/YSDeckVersion/${first.body.objectId}`, 'GET', {}, token)).status, 404);
+});
+
 test('owner can save a large deck, publish, and delete', async () => {
   const token = legacyUser.sessionToken;
   const huge = 'x'.repeat(30e6);
@@ -158,6 +228,13 @@ test('owner can save a large deck, publish, and delete', async () => {
   assert.equal(created.status, 201);
   const id = created.body.objectId;
   assert.match(id, /^[0-9a-f]{24}$/);
+  const version = await sdk(
+    'classes/YSDeckVersion',
+    'POST',
+    { deckId: id, metadata: '{"title":"before delete"}', reason: 'created' },
+    token,
+  );
+  assert.equal(version.status, 201);
 
   const published = await sdk(`classes/YSDeck/${id}`, 'PUT', { metaHTML: '<div id="YS"></div>' }, token);
   assert.equal(published.status, 200);
@@ -167,4 +244,5 @@ test('owner can save a large deck, publish, and delete', async () => {
 
   assert.equal((await sdk(`classes/YSDeck/${id}`, 'DELETE', {}, token)).status, 200);
   assert.equal((await fetch(`${BASE}/1.1/classes/YSDeck/${id}`)).status, 404);
+  assert.equal((await sdk(`classes/YSDeckVersion/${version.body.objectId}`, 'GET', {}, token)).status, 404);
 });

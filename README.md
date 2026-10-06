@@ -56,7 +56,8 @@ CPU 上限是 30 秒，每月含 1000 万次请求，对这个站点来说绰绰
 - `public/js/shared-7e86e14f.js`：`AV.serverURL` 从 `https://api.leancloud.cn` 改成 `/`，
   分享链接改成 https。（改动前的原始镜像是上一个提交）
 - `public/assets/player/index.html`：去掉失效的 `cdn1.lncld.net` SDK，改用 XHR 读取 `/1.1/classes/YSDeck/:id`。
-- 存储：`_User` 和 `YSDeck` 的索引放在 D1；`metadata` / `metaHTML` 放在 R2（`decks/<id>/<field>`），
+- 存储：`_User`、`YSDeck` 和私有的 `YSDeckVersion` 索引放在 D1；演说的 `metadata` / `metaHTML`
+  放在 R2（`decks/<id>/<field>`），版本快照放在 `versions/<id>/metadata`，
   因为 D1 单行最大 2 MB。
 - **保持兼容**：
   - `objectId` 不变，所有旧的分享链接继续可用。
@@ -136,6 +137,9 @@ npm test             # 迁移端到端测试：导入 → 老密码登录 → �
 | `POST /1.1/classes/YSDeck` | 新建演说（需要登录，`pubUserId` 强制为当前用户） |
 | `GET /1.1/classes/YSDeck` | 查询：`where` 支持 `objectId` / `pubUserId` 相等条件，另外支持 `order`、`limit`、`skip`、`keys`、`count` |
 | `GET/PUT/DELETE /1.1/classes/YSDeck/:id` | 读取（公开）、更新和删除（仅作者本人） |
+| `POST /1.1/classes/YSDeckVersion` | 为自己的演说创建私有版本快照 |
+| `GET /1.1/classes/YSDeckVersion` | 按自己的 `pubUserId` 与 `deckId` 查询版本，可加 `objectId`；支持 `order`、`limit`、`skip`、`keys` |
+| `GET/DELETE /1.1/classes/YSDeckVersion/:id` | 读取或删除私有版本（仅演说作者本人） |
 
 SDK 0.6.x 的请求格式是 `POST` + `text/plain` JSON，方法、会话等信息放在 `_method`、`_SessionToken` 字段里；
 标准 REST 请求（真实 HTTP 方法 + `X-LC-Session` 头）也同样支持。其他路由统一返回 `119`。
