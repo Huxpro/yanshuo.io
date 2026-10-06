@@ -155,6 +155,19 @@ npx wrangler d1 migrations apply yanshuo-staging --remote --config wrangler.stag
 npx wrangler deploy --config wrangler.staging.jsonc
 ```
 
+After that deployment is authorized, run the media API smoke test against the
+isolated Worker:
+
+```sh
+TARGET_URL=https://yanshuo-staging.huxpro.workers.dev/ ALLOW_STAGING=1 npm run smoke:media
+```
+
+The script accepts only localhost by default. It creates two random staging test
+accounts, checks direct R2 upload, byte ranges, owner checks, private staging,
+adoption, idempotent guest creation, and media cleanup. It deletes its test decks
+and media; the two test accounts remain because the API has no user-deletion
+endpoint. It never accepts the production domain.
+
 The static player is served by this Worker and reads its same-origin staging
 API. The airtalk Pages project points its default API and player URLs here.
 Production selection in the frontend developer tool explicitly points to the
